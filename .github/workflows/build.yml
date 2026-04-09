@@ -4,6 +4,7 @@ on:
     branches:
       - trunk
       - develop
+      - loc-hh-collection-env-var
 
 env:
   IMAGE_NAME: yesterdays
