@@ -110,7 +110,7 @@ class ImageInfo:
         Returns a dictionary of fields needed to create an Image object.
         """
         metadata = self.get_metadata()
-        if not isinstance(metadata["collec"], str) or not isinstance(metadata["descra"], str):
+        if not isinstance(metadata.get("collec"), str) or not isinstance(metadata.get("descra"), str):
             raise AlbumError
         if isinstance(metadata["date"], str):
             edtf_date = re.match(r"(\d{4})", metadata["date"])
