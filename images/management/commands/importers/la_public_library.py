@@ -106,10 +106,14 @@ class ImageInfo:
         Returns a dictionary of fields needed to create an Image object.
         """
         metadata = self.get_metadata()
-        edtf_date = re.match(r"(\d{4})", metadata["date"])
-        if edtf_date:
-            edtf_date = edtf_date.group(1)
+        if isinstance(metadata["date"], str):
+            edtf_date = re.match(r"(\d{4})", metadata["date"])
+            if edtf_date:
+                edtf_date = edtf_date.group(1)
+            else:
+                edtf_date = ""
         else:
+            # Will be a dict for no date for some reason
             edtf_date = ""
         image_metadata = {
             "title": metadata["title"],
@@ -204,6 +208,7 @@ def add_arguments(parser):
         "--max-images",
         type=int,
         help="Maximum number of images to import (for testing)",
+        default=100,
     )
     parser.add_argument(
         "--dry-run",
