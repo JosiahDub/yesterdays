@@ -229,7 +229,7 @@ def add_arguments(parser):
 
 
 def handle(options):
-    search = LAPLSearch("riverside", num_results=options.max_images)
+    search = LAPLSearch("riverside", num_results=options["max_images"])
 
     results = search.search()
     skip_count = 0
