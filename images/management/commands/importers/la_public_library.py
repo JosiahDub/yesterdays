@@ -115,7 +115,10 @@ class ImageInfo:
         metadata = self.get_metadata()
         if not isinstance(metadata.get("collec"), str) or not isinstance(metadata.get("descra"), str):
             raise AlbumError
-        if "riverside dr" in metadata.get("title", "").lower() or "riverside dr" in metadata.get("histor", "").lower() or "riverside dr" in metadata.get("descra", "").lower():
+        history = str(metadata.get("histor", "")).lower()
+        subject = str(metadata.get("subject", "")).lower()
+        description = str(metadata.get("description", "")).replace("\'", "'")
+        if "riverside dr" in metadata.get("title", "").lower() or "riverside dr" in history or "riverside dr" in subject or "riverside dr" in description.lower():
             raise DriveError
         if isinstance(metadata["date"], str):
             edtf_date = re.match(r"(\d{4})", metadata["date"])
@@ -139,7 +142,7 @@ class ImageInfo:
             # Remove non-breaking space
             "collection": collection,
             # Un-escape quotes
-            "description": metadata["descra"].replace("\'", "'"),
+            "description": description,
             "ref": str(self.image_id),
             "original_url": self.ui_url,
             "creator": metadata["creato"],
