@@ -116,8 +116,8 @@ class ImageInfo:
         if not isinstance(metadata.get("collec"), str) or not isinstance(metadata.get("descra"), str):
             raise AlbumError
         history = str(metadata.get("histor", "")).lower()
-        subject = str(metadata.get("subject", "")).lower()
-        description = str(metadata.get("description", "")).replace("\'", "'")
+        subject = str(metadata.get("subjec", "")).lower()
+        description = str(metadata.get("descra", "")).replace("\'", "'")
         if "riverside dr" in metadata.get("title", "").lower() or "riverside dr" in history or "riverside dr" in subject or "riverside dr" in description.lower():
             raise DriveError
         if isinstance(metadata["date"], str):
