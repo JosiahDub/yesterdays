@@ -24,6 +24,9 @@ R2_UPLOADER = R2Uploader()
 class AlbumError(Exception):
     pass
 
+class DriveError(Exception):
+    pass
+
 
 class ImageInfo:
     """
@@ -112,15 +115,20 @@ class ImageInfo:
         metadata = self.get_metadata()
         if not isinstance(metadata.get("collec"), str) or not isinstance(metadata.get("descra"), str):
             raise AlbumError
+        if "riverside dr" in metadata["title"] or "riverside dr" in metadata["histor"] or "riverside dr" in metadata["descra"]:
+            raise DriveError
         if isinstance(metadata["date"], str):
             edtf_date = re.match(r"(\d{4})", metadata["date"])
             if edtf_date:
                 edtf_date = edtf_date.group(1)
+                date = metadata["date"]
             else:
                 edtf_date = ""
+                date = ""
         else:
             # Will be a dict for no date for some reason
             edtf_date = ""
+            date = ""
         # Dealing with typos and inconsistencies
         collection = (metadata["collec"]
                       .replace("\xa0", " ")
@@ -135,7 +143,7 @@ class ImageInfo:
             "ref": str(self.image_id),
             "original_url": self.ui_url,
             "creator": metadata["creato"],
-            "original_date": metadata["date"],
+            "original_date": date,
             "edtf_date": edtf_date,
         }
         return image_metadata
@@ -222,6 +230,12 @@ def add_arguments(parser):
         default=100,
     )
     parser.add_argument(
+        "--page",
+        type=int,
+        help="Starting page of search results",
+        default=1,
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Show what would be imported without actually importing",
@@ -234,22 +248,23 @@ def add_arguments(parser):
 
 
 def handle(options):
-    search = LAPLSearch("riverside", num_results=options["max_images"])
+    search = LAPLSearch("riverside", num_results=options["max_images"], page=options["page"])
 
-    results = search.search()
     skip_count = 0
     processed_count = 0
     total_count = search.total_results
-
+    fancy_results = tqdm(search.search(), desc=f"Page {search.page}")
     while True:
-        for result in tqdm(results, desc=f"Page {search.page}"):
+        for result in fancy_results:
             image_helper = ImageInfo.from_json(result)
             try:
                 image_metadata = image_helper.image_metadata()
-            except AlbumError:
+            except (AlbumError):
                 print(f"Image ID {image_helper.image_id} is probably an album. Skipping.")
                 skip_count += 1
                 continue
+            except DriveError:
+                print(f"Image ID {image_helper.image_id} has to do with Riverside Drive. Skipping")
             if Image.objects.filter(ref=image_metadata["ref"]).exists():
                 skip_count += 1
                 continue
@@ -295,3 +310,4 @@ def handle(options):
         else:
             print("Searching next page.")
             results = search.search_next_page()
+            fancy_results = tqdm(results, desc=f"Page {search.page}")
