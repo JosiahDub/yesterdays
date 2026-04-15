@@ -258,7 +258,7 @@ def handle(options):
             except Collection.DoesNotExist:
                 print(f'Collection name {image_metadata["collection"]} does not exist for '
                       f'image ID {image_helper.image_id} in folder {image_helper.image_collection}"')
-                collection_continue = input("\nCreate new collection manually and continue (y), skip (s), or quit (N)? [y/N/s] ").strip().lower()
+                collection_continue = input("Create new collection manually and continue (y), skip (s), or quit (N)? [y/N/s] ").strip().lower()
                 if collection_continue == "y":
                     collection = get_collection(image_metadata["collection"])
                 elif collection_continue == "s":
