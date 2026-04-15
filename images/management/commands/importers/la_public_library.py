@@ -268,6 +268,7 @@ def handle(options):
                 continue
             except DriveError:
                 print(f"Image ID {image_helper.image_id} has to do with Riverside Drive. Skipping")
+                continue
             try:
                 collection = get_collection(image_metadata["collection"])
             except Collection.DoesNotExist:
