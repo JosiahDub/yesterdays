@@ -1,4 +1,5 @@
 import re
+import time
 
 import requests
 from typing import ClassVar
@@ -123,7 +124,7 @@ class ImageInfo:
         image_metadata = {
             "title": metadata["title"],
             # Remove non-breaking space
-            "collection": metadata["collec"].replace("\xa0", " "),
+            "collection": metadata["collec"].replace("\xa0", " ").replace("L.A.", "LA"),
             # Un-escape quotes
             "description": metadata["descra"].replace("\'", "'"),
             "ref": str(self.image_id),
@@ -228,7 +229,7 @@ def add_arguments(parser):
 
 
 def handle(options):
-    search = LAPLSearch("riverside", num_results=100)
+    search = LAPLSearch("riverside", num_results=options.max_images)
 
     results = search.search()
     skip_count = 0
@@ -279,7 +280,9 @@ def handle(options):
             processed_count += 1
             if processed_count >= options["max_images"] or (processed_count + skip_count) >= total_count:
                 break
+            time.sleep(POLITE_WAIT_SECS)
         if processed_count >= options["max_images"] or (processed_count + skip_count) >= total_count:
             break
         else:
+            print("Searching next page.")
             results = search.search_next_page()
