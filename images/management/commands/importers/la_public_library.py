@@ -252,8 +252,8 @@ def handle(options):
 
     skip_count = 0
     processed_count = 0
-    total_count = search.total_results
     fancy_results = tqdm(search.search(), desc=f"Page {search.page}")
+    total_count = search.total_results
     while True:
         for result in fancy_results:
             image_helper = ImageInfo.from_json(result)
