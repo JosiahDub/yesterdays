@@ -121,10 +121,15 @@ class ImageInfo:
         else:
             # Will be a dict for no date for some reason
             edtf_date = ""
+        # Dealing with typos and inconsistencies
+        collection = (metadata["collec"]
+                      .replace("\xa0", " ")
+                      .replace("L.A.", "LA")
+                      .replace("Shades of LA Collection", "Shades of LA Photo Collection"))
         image_metadata = {
             "title": metadata["title"],
             # Remove non-breaking space
-            "collection": metadata["collec"].replace("\xa0", " ").replace("L.A.", "LA"),
+            "collection": collection,
             # Un-escape quotes
             "description": metadata["descra"].replace("\'", "'"),
             "ref": str(self.image_id),
@@ -251,9 +256,13 @@ def handle(options):
             try:
                 collection = get_collection(image_metadata["collection"])
             except Collection.DoesNotExist:
-                print(f'Collection name {image_metadata["collection"]} does not exist')
-                if input("\nCreate new collection manually and continue? [y/N] ").strip().lower() == "y":
+                print(f'Collection name {image_metadata["collection"]} does not exist for '
+                      f'image ID {image_helper.image_id} in folder {image_helper.image_collection}"')
+                collection_continue = input("\nCreate new collection manually and continue (y), skip (s), or quit (N)? [y/N/s] ").strip().lower()
+                if collection_continue == "y":
                     collection = get_collection(image_metadata["collection"])
+                elif collection_continue == "s":
+                    continue
                 else:
                     return
             tqdm.write(f"      → Inserting image {image_helper.download_url}")
