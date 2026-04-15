@@ -268,9 +268,11 @@ def handle(options):
             except AlbumError:
                 print(f"Image ID {image_helper.image_id} is probably an album. Skipping.")
                 skip_count += 1
+                time.sleep(POLITE_WAIT_SECS)
                 continue
             except DriveError:
                 print(f"Image ID {image_helper.image_id} has to do with Riverside Drive. Skipping")
+                skip_count += 1
                 continue
             try:
                 collection = get_collection(image_metadata["collection"])
@@ -306,9 +308,9 @@ def handle(options):
             else:
                 tqdm.write("      ⚠ Failed to upload original, keeping source URL")
             processed_count += 1
+            time.sleep(POLITE_WAIT_SECS)
             if processed_count >= options["max_images"] or (processed_count + skip_count) >= total_count:
                 break
-            time.sleep(POLITE_WAIT_SECS)
         if processed_count >= options["max_images"] or (processed_count + skip_count) >= total_count:
             break
         else:
