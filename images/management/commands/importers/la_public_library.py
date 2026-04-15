@@ -115,7 +115,7 @@ class ImageInfo:
         metadata = self.get_metadata()
         if not isinstance(metadata.get("collec"), str) or not isinstance(metadata.get("descra"), str):
             raise AlbumError
-        if "riverside dr" in metadata["title"] or "riverside dr" in metadata["histor"] or "riverside dr" in metadata["descra"]:
+        if "riverside dr" in metadata["title"].lower() or "riverside dr" in metadata["histor"].lower() or "riverside dr" in metadata["descra"].lower():
             raise DriveError
         if isinstance(metadata["date"], str):
             edtf_date = re.match(r"(\d{4})", metadata["date"])
@@ -257,17 +257,17 @@ def handle(options):
     while True:
         for result in fancy_results:
             image_helper = ImageInfo.from_json(result)
+            if Image.objects.filter(ref=image_helper.image_id).exists():
+                skip_count += 1
+                continue
             try:
                 image_metadata = image_helper.image_metadata()
-            except (AlbumError):
+            except AlbumError:
                 print(f"Image ID {image_helper.image_id} is probably an album. Skipping.")
                 skip_count += 1
                 continue
             except DriveError:
                 print(f"Image ID {image_helper.image_id} has to do with Riverside Drive. Skipping")
-            if Image.objects.filter(ref=image_metadata["ref"]).exists():
-                skip_count += 1
-                continue
             try:
                 collection = get_collection(image_metadata["collection"])
             except Collection.DoesNotExist:
