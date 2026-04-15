@@ -1,22 +1,30 @@
+import re
+
 import requests
 from typing import ClassVar
 
+from tqdm import tqdm
 
-# Info API
-# https://tessa2.lapl.org/digital/bl/dmwebservices/index.php?q=dmGetItemInfo/photos/111547.jpg/json
-#
-# File download
-# https://tessa2.lapl.org/digital/download/collection/photos/id/111547/size/large
+from images.models import Collection, Image
+from images.tasks import generate_iiif_tiles
+from images.utils import R2Uploader
+
 
 HEADERS = {"User-Agent": "Yesterdays/1.0 (https://inlandempire.place)"}
 
 BASE_URL = "https://tessa2.lapl.org/digital"
 
+POLITE_WAIT_SECS = 1
+
+ALL_COLLECTIONS = {}
+
+R2_UPLOADER = R2Uploader()
+
 
 class ImageInfo:
     """
     Info API example
-    https://tessa2.lapl.org/digital/bl/dmwebservices/index.php?q=dmGetItemInfo/photos/111547.jpg/json
+    https://tessa2.lapl.org/digital/bl/dmwebservices/index.php?q=dmGetItemInfo/photos/111547/json
 
     File download example
     https://tessa2.lapl.org/digital/download/collection/photos/id/111547/size/large
@@ -98,17 +106,22 @@ class ImageInfo:
         Returns a dictionary of fields needed to create an Image object.
         """
         metadata = self.get_metadata()
+        edtf_date = re.match(r"(\d{4})", metadata["date"])
+        if edtf_date:
+            edtf_date = edtf_date.group(1)
+        else:
+            edtf_date = ""
         image_metadata = {
             "title": metadata["title"],
             # Remove non-breaking space
             "collection": metadata["collec"].replace("\xa0", " "),
+            # Un-escape quotes
             "description": metadata["descra"].replace("\'", "'"),
             "ref": str(self.image_id),
             "original_url": self.ui_url,
             "creator": metadata["creato"],
-            # TODO: extract date
             "original_date": metadata["date"],
-            "edtf_date": "",
+            "edtf_date": edtf_date,
         }
         return image_metadata
 
@@ -132,10 +145,15 @@ class LAPLSearch:
             "total": 1340
         },
         """
-        self.pagination: dict = ...
-        self.page_data: dict = ...
+        self.pagination: dict = {}
+        self.page_data: dict = {}
 
     def search(self) -> dict:
+        """
+        Searches all images at once.
+
+        I have not found a way to search a specific collection
+        """
         search_url = self.search_url.format(
             base_url=BASE_URL,
             search_term=self.search_term,
@@ -165,12 +183,88 @@ class LAPLSearch:
         return self.pagination["total"]
 
 
-search = LAPLSearch("riverside")
+def get_collection(collection_name: str) -> Collection:
+    """
+    Get and save collections for later
 
-results = search.search()
+    """
+    if ";" in collection_name:
+        # images can be in multiple collections, separated by semicolon. Just get first
+        collection_name = collection_name.split(";")[0]
+    if collection_name in ALL_COLLECTIONS:
+        return ALL_COLLECTIONS[collection_name]
+    else:
+        collection = Collection.objects.get(name=collection_name)
+        ALL_COLLECTIONS[collection_name] = collection
+        return collection
 
-for result in results:
-    image = ImageInfo.from_json(result)
-    metadata = image.get_metadata()
-    print(metadata)
 
+def add_arguments(parser):
+    parser.add_argument(
+        "--max-images",
+        type=int,
+        help="Maximum number of images to import (for testing)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be imported without actually importing",
+    )
+    parser.add_argument(
+        "--debug",
+        default=None,
+        help='Print metadata ("meta") or image data ("image") for debugging',
+    )
+
+
+def handle(options):
+    search = LAPLSearch("riverside", num_results=100)
+
+    results = search.search()
+    skip_count = 0
+    processed_count = 0
+    total_count = search.total_results
+
+    while True:
+        for result in tqdm(results, desc=f"Page {search.page}"):
+            image_helper = ImageInfo.from_json(result)
+            image_metadata = image_helper.image_metadata()
+            if Image.objects.filter(ref=image_metadata["ref"]).exists():
+                skip_count += 1
+                continue
+            try:
+                collection = get_collection(image_metadata["collection"])
+            except Collection.DoesNotExist:
+                print(f'Collection name {image_metadata["collection"]} does not exist')
+                if input("\nCreate new collection manually and continue? [y/N] ").strip().lower() == "y":
+                    collection = get_collection(image_metadata["collection"])
+                else:
+                    return
+            tqdm.write(f"      → Inserting image {image_helper.download_url}")
+            image = Image.objects.create(
+                collection=collection,
+                title=image_metadata["title"],
+                description=image_metadata["description"],
+                ref=image_metadata["ref"],
+                original_url=image_metadata["original_url"],
+                creator=image_metadata["creator"],
+                original_date=image_metadata["original_date"],
+                edtf_date=image_metadata["edtf_date"],
+                permalink=image_helper.download_url,
+            )
+            tqdm.write(f"      → Created image ID: {image.id}")
+            r2_url = R2_UPLOADER.upload_original(
+                image.id, image_helper.download_url, in_tqdm=True,
+            )
+            if r2_url:
+                Image.objects.filter(pk=image.id).update(permalink=r2_url)
+                generate_iiif_tiles.delay(image.id)
+            else:
+                tqdm.write("      ⚠ Failed to upload original, keeping source URL")
+            processed_count += 1
+            if processed_count >= options.max_images or (processed_count + skip_count) >= total_count:
+                break
+        if processed_count >= options.max_images or (processed_count + skip_count) >= total_count:
+            break
+        else:
+            results = search.search_next_page()
