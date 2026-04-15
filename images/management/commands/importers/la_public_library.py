@@ -115,7 +115,7 @@ class ImageInfo:
         metadata = self.get_metadata()
         if not isinstance(metadata.get("collec"), str) or not isinstance(metadata.get("descra"), str):
             raise AlbumError
-        if "riverside dr" in metadata["title"].lower() or "riverside dr" in metadata["histor"].lower() or "riverside dr" in metadata["descra"].lower():
+        if "riverside dr" in metadata.get("title", "").lower() or "riverside dr" in metadata.get("histor", "").lower() or "riverside dr" in metadata.get("descra", "").lower():
             raise DriveError
         if isinstance(metadata["date"], str):
             edtf_date = re.match(r"(\d{4})", metadata["date"])
