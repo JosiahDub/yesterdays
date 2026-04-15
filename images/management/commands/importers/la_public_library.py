@@ -20,6 +20,9 @@ ALL_COLLECTIONS = {}
 
 R2_UPLOADER = R2Uploader()
 
+class AlbumError(Exception):
+    pass
+
 
 class ImageInfo:
     """
@@ -106,6 +109,8 @@ class ImageInfo:
         Returns a dictionary of fields needed to create an Image object.
         """
         metadata = self.get_metadata()
+        if not isinstance(metadata["collec"], str) or not isinstance(metadata["descra"], str):
+            raise AlbumError
         if isinstance(metadata["date"], str):
             edtf_date = re.match(r"(\d{4})", metadata["date"])
             if edtf_date:
@@ -233,7 +238,12 @@ def handle(options):
     while True:
         for result in tqdm(results, desc=f"Page {search.page}"):
             image_helper = ImageInfo.from_json(result)
-            image_metadata = image_helper.image_metadata()
+            try:
+                image_metadata = image_helper.image_metadata()
+            except AlbumError:
+                print(f"Image ID {image_helper.image_id} is probably an album. Skipping.")
+                skip_count += 1
+                continue
             if Image.objects.filter(ref=image_metadata["ref"]).exists():
                 skip_count += 1
                 continue
