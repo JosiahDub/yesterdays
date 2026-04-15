@@ -262,9 +262,9 @@ def handle(options):
             else:
                 tqdm.write("      ⚠ Failed to upload original, keeping source URL")
             processed_count += 1
-            if processed_count >= options.max_images or (processed_count + skip_count) >= total_count:
+            if processed_count >= options["max_images"] or (processed_count + skip_count) >= total_count:
                 break
-        if processed_count >= options.max_images or (processed_count + skip_count) >= total_count:
+        if processed_count >= options["max_images"] or (processed_count + skip_count) >= total_count:
             break
         else:
             results = search.search_next_page()
