@@ -572,7 +572,14 @@ class R2Uploader:
 
         try:
             _print(f"  Downloading from: {source_url}")
-            response = requests.get(source_url, timeout=timeout, stream=True)
+            response = requests.get(
+                source_url,
+                timeout=timeout,
+                stream=True,
+                headers={
+                    "User-Agent": "Yesterdays/1.0 (https://maprva.org)",
+                },
+            )
             response.raise_for_status()
 
             file_content = response.content
