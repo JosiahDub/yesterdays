@@ -100,6 +100,7 @@ def handle(options):
                 r2_url = r2_uploader.upload_file_content(
                     file_data,
                     r2_uploader.generate_key_from_url(img_obj.ref),
+                    overwrite=True,
                 )
 
             if r2_url:
