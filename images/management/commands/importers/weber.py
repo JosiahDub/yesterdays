@@ -77,6 +77,7 @@ def handle(options):
     for index, file_name in enumerate(os.listdir(image_dir)):
 
         title, year = TITLES[index]
+        year = str(year)
         print(f"Processing {index}: {file_name}")
         full_path = os.path.join(image_dir, file_name)
 
@@ -110,6 +111,7 @@ def handle(options):
 
         except Exception as e:
             print(f"Failed {file_name}: {e}")
+            raise
 full_description = {
     "base": "https://photos.adobe.io/v2/spaces/88b5889703184af48fdc7bdaadcd2063/",
     "album": {
