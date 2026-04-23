@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from images.models import Collection, Image, Source
+from images.models import Collection, Image
 from images.tasks import generate_iiif_tiles
 from images.utils import R2Uploader
 
@@ -69,8 +69,7 @@ def handle(options):
     current_dir = Path(__file__).parent.resolve()
     image_dir = Path(current_dir).joinpath("images")
 
-    source, _ = Source.objects.get(name="Old Riverside Foundation")
-    collection, _ = Collection.objects.get(
+    collection = Collection.objects.get(
         name="Peter J. Weber Collection",
     )
     r2_uploader = R2Uploader()
