@@ -74,7 +74,7 @@ def handle(options):
     )
     r2_uploader = R2Uploader()
 
-    for index, file_name in enumerate(os.listdir(image_dir)):
+    for index, file_name in enumerate(sorted(os.listdir(image_dir))):
 
         title, year = TITLES[index]
         year = str(year)
