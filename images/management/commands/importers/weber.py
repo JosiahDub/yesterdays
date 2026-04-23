@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-from django.core.management.base import BaseCommand
 from images.models import Collection, Image, Source
 from images.tasks import generate_iiif_tiles
 from images.utils import R2Uploader
@@ -67,7 +66,6 @@ def add_arguments(parser):
     pass
 
 def handle(options):
-    # 1. Configuration
     current_dir = Path(__file__).parent.resolve()
     image_dir = Path(current_dir).joinpath("images")
 
@@ -77,11 +75,11 @@ def handle(options):
     )
     r2_uploader = R2Uploader()
 
-    # 2. Open and Iterate
     for index, file_name in enumerate(os.listdir(image_dir)):
 
         title, year = TITLES[index]
         print(f"Processing {index}: {file_name}")
+        full_path = os.path.join(image_dir, file_name)
 
         try:
             # Create the record first to get an ID
@@ -89,16 +87,16 @@ def handle(options):
                 collection=collection,
                 title=title,
                 description="",
-                ref=f"peter-j-weber-{index}",  # Unique ref based on zip index
+                creator="Peter J. Weber",
+                ref=f"pjw-{index}",  # Unique ref based on index
                 original_date=year,
                 edtf_date=year,
-                license=options["license"]
+                license=options["license"],
             )
 
             # Extract file to memory and upload
-            with open(file_name) as f:
-                file_data = f.read().encode("utf-8")
-                # Assuming your R2Uploader can take bytes or you wrap in BytesIO
+            with open(full_path, "rb") as f:
+                file_data = f.read()
                 r2_url = r2_uploader.upload_file_content(
                     file_data,
                     r2_uploader.generate_key_from_url(img_obj.ref),
@@ -107,10 +105,12 @@ def handle(options):
             if r2_url:
                 Image.objects.filter(pk=img_obj.id).update(permalink=r2_url)
                 generate_iiif_tiles.delay(img_obj.id)
-                self.stdout.write(self.style.SUCCESS(f"Uploaded {file_name}"))
+                print(f"Uploaded {file_name}")
+            else:
+                print("Upload failed?")
 
         except Exception as e:
-            self.stdout.write(self.style.ERROR(f"Failed {file_name}: {e}"))
+            print(f"Failed {file_name}: {e}")
 full_description = {
     "base": "https://photos.adobe.io/v2/spaces/88b5889703184af48fdc7bdaadcd2063/",
     "album": {
