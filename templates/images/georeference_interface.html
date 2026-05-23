@@ -270,7 +270,7 @@
                         <div>
                             <label class="form-label fw-bold">Centerline:</label>
                             <div class="form-check">
-                                <input class="form-check-input" type="checkbox" id="bearing-line-toggle">
+                                <input class="form-check-input" type="checkbox" id="bearing-line-toggle"{% if user_preferences.georef_show_centerline %} checked{% endif %}>
                                 <label class="form-check-label" for="bearing-line-toggle">
                                     Show centerline
                                 </label>
@@ -280,19 +280,19 @@
                             <label class="form-label fw-bold">Context Images:</label>
                             <div>
                                 <div class="form-check">
-                                    <input class="form-check-input" type="radio" name="contextDisplay" value="hidden" id="context-hidden">
+                                    <input class="form-check-input" type="radio" name="contextDisplay" value="hidden" id="context-hidden"{% if user_preferences.georef_context_images == "hidden" %} checked{% endif %}>
                                     <label class="form-check-label" for="context-hidden">
                                         Hidden
                                     </label>
                                 </div>
                                 <div class="form-check">
-                                    <input class="form-check-input" type="radio" name="contextDisplay" value="ghost" id="context-ghost" checked>
+                                    <input class="form-check-input" type="radio" name="contextDisplay" value="ghost" id="context-ghost"{% if user_preferences.georef_context_images == "ghost" %} checked{% endif %}>
                                     <label class="form-check-label" for="context-ghost">
-                                        Ghost (default)
+                                        Ghost
                                     </label>
                                 </div>
                                 <div class="form-check">
-                                    <input class="form-check-input" type="radio" name="contextDisplay" value="clickable" id="context-clickable">
+                                    <input class="form-check-input" type="radio" name="contextDisplay" value="clickable" id="context-clickable"{% if user_preferences.georef_context_images == "clickable" %} checked{% endif %}>
                                     <label class="form-check-label" for="context-clickable">
                                         Clickable with popups
                                     </label>
@@ -523,6 +523,9 @@
         isAuthenticated: {{ request.user.is_authenticated|yesno:"true,false" }},
         difficultyFilters: {{ difficulty_filters_json|safe }},
         remainingCount: {{ remaining_count|default:0 }},
+        defaultMapLat: {{ default_map_center.1|floatformat:6 }},
+        defaultMapLng: {{ default_map_center.0|floatformat:6 }},
+        defaultMapZoom: {{ default_map_zoom }},
         urls: {
             georeferenceImage: {% if current_image %}"{% url 'images:georeference_image' current_image.id %}"{% else %}null{% endif %},
             skipImage: {% if current_image %}"{% url 'images:skip_image' current_image.id %}"{% else %}null{% endif %},

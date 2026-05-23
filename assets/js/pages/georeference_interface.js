@@ -16,7 +16,10 @@ import { initImageViewer } from "../components/image_viewer.js";
 import { OSM_STYLE_URL } from "../constants/map.js";
 import { LayerControl } from "../components/layer_control.js";
 import { addResponsiveGeocoder } from "../components/responsive_geocoder.js";
-import { deduplicateFeatures, buildPopupWrapper } from "../components/map_popup.js";
+import {
+  deduplicateFeatures,
+  buildPopupWrapper,
+} from "../components/map_popup.js";
 
 // Get colors from Bootstrap's CSS custom properties
 const dangerColor =
@@ -256,9 +259,8 @@ document.addEventListener("DOMContentLoaded", function () {
       mapOptions.center = allHintCoords[0];
       mapOptions.zoom = 17;
     } else {
-      // No hints: default Richmond center
-      mapOptions.center = [-117.37, 33.98];
-      mapOptions.zoom = 11.5;
+      mapOptions.center = [config.defaultMapLng, config.defaultMapLat];
+      mapOptions.zoom = config.defaultMapZoom;
     }
 
     // Initialize map
@@ -624,6 +626,7 @@ document.addEventListener("DOMContentLoaded", function () {
     var currentDirection = null;
     var isJoystickDragging = false;
     var bearingLineEnabled = false;
+    var osdCenterlineOverlay = null;
     var contextDisplayMode = "ghost"; // Default to ghost mode
     var isHoveringContextImage = false; // Track when hovering over context images
     var activePopup = null; // Track active popup
@@ -668,18 +671,24 @@ document.addEventListener("DOMContentLoaded", function () {
         !isNaN(lat) &&
         !isNaN(lng);
 
-      // Sync image centerline with map bearing line visibility
+      // Sync image centerline with map bearing line visibility.
+      // Uses `visibility` rather than `display` because OSD's overlay renderer
+      // resets `display` to "block" on every repaint.
+      if (osdCenterlineOverlay) {
+        osdCenterlineOverlay.style.visibility = bearingLineVisible
+          ? "visible"
+          : "hidden";
+      }
       var imageCenterline = document.querySelector(".image-centerline");
       if (imageCenterline) {
-        imageCenterline.style.display = bearingLineVisible ? "block" : "none";
+        imageCenterline.style.visibility = bearingLineVisible
+          ? "visible"
+          : "hidden";
       }
 
       if (bearingLineVisible) {
-        // Compute distance from map center to corner so the line always extends off-screen
-        var bounds = map.getBounds();
-        var center = map.getCenter();
-        var cornerDist = center.distanceTo(bounds.getNorthEast());
-        var totalDist = cornerDist * 2;
+        // 5000 km should be plenty...
+        var totalDist = 5000000;
 
         // Interpolate points along the great circle so the line curves correctly
         // when zoomed out on a Mercator projection
@@ -1203,9 +1212,6 @@ document.addEventListener("DOMContentLoaded", function () {
       map.on("moveend", updateMapSwapLink);
 
       restoreOverlayState();
-
-      // Recalculate bearing line on zoom/pan so it always extends off-screen
-      map.on("moveend", updateBearingLine);
     });
 
     map.on("click", function (e) {
@@ -1645,6 +1651,32 @@ document.addEventListener("DOMContentLoaded", function () {
           }
         }
         updateBearingLine();
+      });
+    }
+
+    // Create an OSD overlay for the image centerline (fixed to the image)
+    var osdEl = document.getElementById("osd-viewer");
+    var osdViewer = osdEl && osdEl.osdViewer;
+    if (osdViewer) {
+      osdViewer.addHandler("open", function () {
+        var contentSize = osdViewer.world.getItemAt(0).getContentSize();
+
+        osdCenterlineOverlay = document.createElement("div");
+        osdCenterlineOverlay.className = "image-centerline-overlay";
+        osdCenterlineOverlay.style.visibility = "hidden";
+
+        osdViewer.addOverlay({
+          element: osdCenterlineOverlay,
+          px: contentSize.x / 2,
+          py: 0,
+          width: 0,
+          height: contentSize.y,
+        });
+
+        // Show immediately if bearing line is already enabled
+        if (bearingLineEnabled && pinPlaced && currentDirection !== null) {
+          osdCenterlineOverlay.style.visibility = "visible";
+        }
       });
     }
 

@@ -5,7 +5,14 @@ from django.shortcuts import get_object_or_404
 from django.urls import path, reverse
 from django.utils.html import format_html
 
-from .models import Address, Business, Occupation, OsmElement, Person, Subject, WikidataItem
+from .models import (
+    Business,
+    Occupation,
+    OsmElement,
+    Person,
+    Subject,
+    WikidataItem,
+)
 
 
 @admin.register(WikidataItem)
@@ -186,12 +193,6 @@ class WikidataItemAdmin(admin.ModelAdmin):
     refresh_button.short_description = "Actions"
 
 
-@admin.register(Address)
-class AddressAdmin(admin.ModelAdmin):
-    list_display = ["housenumber", "street", "city", "state", "postcode"]
-    search_fields = ["housenumber", "street", "city", "state", "postcode"]
-
-
 @admin.register(Person)
 class PersonAdmin(admin.ModelAdmin):
     list_display = ["last_name", "first_name", "middle_name", "birth_date"]
@@ -239,9 +240,10 @@ class SubjectAdmin(admin.ModelAdmin):
         "wikidata_item_link",
         "osm_element_count",
         "image_count",
+        "ancestor_count",
         "created_at",
     )
-    list_filter = ("created_at", "wikidata_item")
+    list_filter = ("created_at",)
     search_fields = (
         "title",
         "description",
@@ -304,3 +306,8 @@ class SubjectAdmin(admin.ModelAdmin):
         return obj.image_mappings.count()
 
     image_count.short_description = "Images"
+
+    def ancestor_count(self, obj):
+        return obj.ancestors.count()
+
+    ancestor_count.short_description = "Ancestors"

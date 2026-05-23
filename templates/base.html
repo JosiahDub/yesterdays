@@ -14,6 +14,7 @@
         window.OSM_STYLE_URL = "{{ osm_style_url }}";
         window.DEFAULT_MAP_CENTER = {{ default_map_center }};
         window.DEFAULT_MAP_ZOOM = {{ default_map_zoom }};
+        window.DEFAULT_SEARCH_BBOX = {{ default_search_bbox }};
         window.ADMIN_EMAIL = {% if admin_email %}"{{ admin_email }}"{% else %}null{% endif %};
         window.MAP_LAYERS_DATA = {{ map_layers_json|safe }};
     </script>
@@ -60,7 +61,7 @@
                             <li><a class="dropdown-item" href="{% url 'subjects:browse_subjects' %}">Subjects</a></li>
                             <li><a class="dropdown-item" href="{% url 'images:browse_aerials' %}">From Above</a></li>
                             <li><a class="dropdown-item" href="{% url 'images:favorites' %}">Favorites</a></li>
-                            <li><a class="dropdown-item" href="{% url 'maps:browse_maps' %}">Maps</a></li>
+                            <li><a class="dropdown-item" href="{% url 'maps:browse_maps' %}">Map Layers</a></li>
                             {% if DIRECTORIES_ENABLED %}<li><a class="dropdown-item" href="{% url 'directories:directory_list' %}">Directories</a></li>{% endif %}
                             <li><a class="dropdown-item" href="{% url 'activity:feed' %}">Activity</a></li>
                             <li><a class="dropdown-item" href="{% url 'stats' %}">Stats</a></li>
@@ -72,16 +73,23 @@
                     {% if request.session.is_authenticated %}
                         <li class="nav-item dropdown">
                             <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
-                                {% if request.session.osm_user_data.img_url %}
-                                    <img src="{{ request.session.osm_user_data.img_url }}" alt="Profile" class="rounded-circle me-1" style="height: 1.5em; width: 1.5em; object-fit: cover;">
-                                {% else %}
-                                    <i class="fas fa-user me-1"></i>
-                                {% endif %}
+                                {% with profile_picture_url=request.user.get_profile_picture_url %}
+                                    {% if profile_picture_url %}
+                                        <img src="{{ profile_picture_url }}" alt="Profile" class="rounded-circle me-1" style="height: 1.5em; width: 1.5em; object-fit: cover;">
+                                    {% elif request.session.osm_user_data.img_url %}
+                                        <img src="{{ request.session.osm_user_data.img_url }}" alt="Profile" class="rounded-circle me-1" style="height: 1.5em; width: 1.5em; object-fit: cover;">
+                                    {% else %}
+                                        <i class="fas fa-user me-1"></i>
+                                    {% endif %}
+                                {% endwith %}
                                 {{ request.session.osm_username }}
                             </a>
                             <ul class="dropdown-menu">
                                 <li><a class="dropdown-item" href="{% url 'user_profile' request.session.osm_username %}">
                                     <i class="fas fa-user-circle me-2"></i>Profile
+                                </a></li>
+                                <li><a class="dropdown-item" href="{% url 'settings:index' %}">
+                                    <i class="fas fa-cog me-2"></i>Settings
                                 </a></li>
                                 <li><hr class="dropdown-divider"></li>
                                 <li><a class="dropdown-item" href="{% url 'osm_auth:logout' %}">
