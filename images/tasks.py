@@ -110,7 +110,7 @@ def encode_image(image_b64):
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60, ignore_result=True)
-def process_image(self, image_id: int, quality: int = 85):
+def process_image(self, image_id: int, quality: int = 85, force: bool = False):
     """
     Ensure an image has the correct transformed/plain assets on R2.
 
@@ -141,7 +141,8 @@ def process_image(self, image_id: int, quality: int = 85):
     needs_migration = image.asset_generation == 0
 
     if (
-        not needs_transform
+        not force
+        and not needs_transform
         and not needs_thumbnail
         and not needs_transform_cleanup
         and not needs_migration
@@ -241,6 +242,7 @@ def process_images_batch(
     collection_id: int | None = None,
     image_ids: list[int] | None = None,
     quality: int = 85,
+    force: bool = False,
 ):
     """
     Queue image processing for multiple images.
@@ -249,6 +251,7 @@ def process_images_batch(
         collection_id: Optional collection to filter by
         image_ids: Optional specific image IDs to process
         quality: WEBP quality
+        force: Force image processing
     """
     queryset = Image.objects.all()
 
@@ -259,7 +262,7 @@ def process_images_batch(
 
     count = 0
     for image_id in queryset.values_list("id", flat=True):
-        process_image.delay(image_id, quality=quality)
+        process_image.delay(image_id, quality=quality, force=force)
         count += 1
 
     return {"queued": count}
