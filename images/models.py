@@ -462,19 +462,37 @@ class Image(models.Model):
         # When transforms change, clear stale assets immediately so the user
         # sees the original image while the background task regenerates them.
         update_fields = kwargs.get("update_fields")
-        if self.pk and (
-            update_fields is None or {"rotation", "mirror"} & set(update_fields)
-        ):
-            try:
-                old = Image.objects.only("rotation", "mirror").get(pk=self.pk)
-                if old.rotation != self.rotation or old.mirror != self.mirror:
-                    self.transformed_permalink = None
-                    self.thumbnail = None
-                    self.tile_status = ""
-                    self.tile_error = ""
-                    self.iiif_url = None
-            except Image.DoesNotExist:
-                pass
+        if self.pk:
+            if update_fields is None or {"rotation", "mirror"} & set(update_fields):
+                try:
+                    old = Image.objects.only(
+                        "rotation", "mirror", "thumbnail", "transformed_permalink",
+                        "asset_generation", "tile_status", "tile_error", "iiif_url",
+                        "width", "height", "embedding", "skip_count"
+                    ).get(pk=self.pk)
+                    
+                    if old.rotation != self.rotation or old.mirror != self.mirror:
+                        self.transformed_permalink = None
+                        self.thumbnail = None
+                        self.tile_status = ""
+                        self.tile_error = ""
+                        self.iiif_url = None
+                    elif update_fields is None:
+                        # If this is a generic save (e.g. from a Django Admin form), 
+                        # restore background-managed fields from the database to prevent 
+                        # a race condition where stale in-memory values overwrite them.
+                        self.thumbnail = old.thumbnail
+                        self.transformed_permalink = old.transformed_permalink
+                        self.asset_generation = old.asset_generation
+                        self.tile_status = old.tile_status
+                        self.tile_error = old.tile_error
+                        self.iiif_url = old.iiif_url
+                        self.width = old.width
+                        self.height = old.height
+                        self.embedding = old.embedding
+                        self.skip_count = old.skip_count
+                except Image.DoesNotExist:
+                    pass
 
         super().save(*args, **kwargs)
 
