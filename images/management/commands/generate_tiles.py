@@ -112,6 +112,7 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.SUCCESS(
-                f"Migration complete: {migrated} migrated, {failed} failed."
+                f"Migration complete: {migrated} migrated, {failed} failed. "
+                f"Asset/tile generation queued for migrated images."
             )
         )

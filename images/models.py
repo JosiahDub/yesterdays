@@ -9,6 +9,7 @@ from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import Count, F, Q
+from django.db.models.functions import Lower
 
 # Conditionally import SearchVectorField only if using PostgreSQL
 try:
@@ -91,6 +92,38 @@ class SiteSettings(models.Model):
     default_map_zoom = models.FloatField(
         default=10.0,
         help_text="Default map zoom level (0-22, supports decimals like 11.5)",
+    )
+    default_search_bbox_west = models.FloatField(
+        default=-77.61976,
+        help_text="Westernmost longitude for the default search bounding box (used by the geocoder and other location filters)",
+    )
+    default_search_bbox_south = models.FloatField(
+        default=37.44393,
+        help_text="Southernmost latitude for the default search bounding box",
+    )
+    default_search_bbox_east = models.FloatField(
+        default=-77.36673,
+        help_text="Easternmost longitude for the default search bounding box",
+    )
+    default_search_bbox_north = models.FloatField(
+        default=37.60954,
+        help_text="Northernmost latitude for the default search bounding box",
+    )
+    default_subject_bbox_west = models.FloatField(
+        default=-84.72,
+        help_text="Westernmost longitude for the default subject bounding box (used when refreshing OSM metadata for subjects)",
+    )
+    default_subject_bbox_south = models.FloatField(
+        default=35.90,
+        help_text="Southernmost latitude for the default subject bounding box",
+    )
+    default_subject_bbox_east = models.FloatField(
+        default=-74.97,
+        help_text="Easternmost longitude for the default subject bounding box",
+    )
+    default_subject_bbox_north = models.FloatField(
+        default=39.71,
+        help_text="Northernmost latitude for the default subject bounding box",
     )
 
     class Meta:
@@ -265,6 +298,12 @@ class License(models.Model):
 
     class Meta:
         ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                Lower("name"),
+                name="unique_license_name_ci",
+            ),
+        ]
 
 
 class Image(models.Model):
@@ -348,9 +387,20 @@ class Image(models.Model):
         # Validate EDTF date format if provided
         if self.edtf_date:
             try:
-                parse_edtf(self.edtf_date)
+                parsed = parse_edtf(self.edtf_date)
             except EDTFParseException as e:
                 raise ValidationError({"edtf_date": f"Invalid EDTF format: {str(e)}"})
+            if isinstance(parsed.lower_strict(), float) or isinstance(
+                parsed.upper_strict(), float
+            ):
+                raise ValidationError(
+                    {
+                        "edtf_date": (
+                            f'EDTF date "{self.edtf_date}" is open-ended; both '
+                            "a start and end date are required."
+                        )
+                    }
+                )
 
         # Prevent chains of duplicates
         if self.duplicate_of:
@@ -390,12 +440,19 @@ class Image(models.Model):
         if self.edtf_date:
             try:
                 edtf_date = parse_edtf(self.edtf_date)
-                self.start_decdate = edtf_date.lower_strict()[0]
-                self.fuzzy_start_decdate = edtf_date.lower_fuzzy()[0]
-                self.end_decdate = edtf_date.upper_strict()[0]
-                self.fuzzy_end_decdate = edtf_date.upper_fuzzy()[0]
             except EDTFParseException as e:
                 raise ValidationError(f'Invalid EDTF date "{self.edtf_date}": {str(e)}')
+            lower = edtf_date.lower_strict()
+            upper = edtf_date.upper_strict()
+            if isinstance(lower, float) or isinstance(upper, float):
+                raise ValidationError(
+                    f'EDTF date "{self.edtf_date}" is open-ended; both a start '
+                    "and end date are required."
+                )
+            self.start_decdate = lower[0]
+            self.fuzzy_start_decdate = edtf_date.lower_fuzzy()[0]
+            self.end_decdate = upper[0]
+            self.fuzzy_end_decdate = edtf_date.upper_fuzzy()[0]
         else:
             self.start_decdate = None
             self.fuzzy_start_decdate = None
@@ -457,6 +514,14 @@ class Image(models.Model):
     )
     width = models.PositiveIntegerField(null=True, blank=True)
     height = models.PositiveIntegerField(null=True, blank=True)
+    asset_generation = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "Incremented each time generated assets (transformed image, "
+            "thumbnail, IIIF tiles) are regenerated; used as a path "
+            "segment to bypass CDN caching."
+        ),
+    )
 
     source_point = gis_models.PointField(
         null=True,
@@ -692,6 +757,29 @@ class PreImage(models.Model):
         if self.original_date:
             return str(self.original_date)
         return "Unknown date"
+
+
+class ImportSlot(models.Model):
+    """Temporary slot for an image upload in progress.
+
+    Tracks a presigned S3 key that a client is authorized to upload to.
+    Once the upload is confirmed and metadata is provided, the image is
+    copied to its permanent location and a real Image row is created.
+    """
+
+    slot_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    collection = models.ForeignKey(
+        Collection, on_delete=models.CASCADE, related_name="import_slots"
+    )
+    created_by = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="import_slots"
+    )
+    s3_key = models.CharField(max_length=500)
+    content_type = models.CharField(max_length=100, default="image/jpeg")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"ImportSlot {self.slot_id} ({self.s3_key})"
 
 
 class Georeference(models.Model):
@@ -1001,6 +1089,76 @@ class SubjectMapping(models.Model):
         ordering = ["image", "order", "subject__title"]
 
 
+SUBJECT_MAPPING_ACTION_ADDED = "added"
+SUBJECT_MAPPING_ACTION_REMOVED = "removed"
+SUBJECT_MAPPING_ACTION_REORDERED = "reordered"
+SUBJECT_MAPPING_ACTION_CHOICES = [
+    (SUBJECT_MAPPING_ACTION_ADDED, "Added"),
+    (SUBJECT_MAPPING_ACTION_REMOVED, "Removed"),
+    (SUBJECT_MAPPING_ACTION_REORDERED, "Reordered"),
+]
+
+
+class SubjectMappingActivity(models.Model):
+    """Audit log of subject changes (additions, removals, reorders) on images."""
+
+    ACTION_ADDED = SUBJECT_MAPPING_ACTION_ADDED
+    ACTION_REMOVED = SUBJECT_MAPPING_ACTION_REMOVED
+    ACTION_REORDERED = SUBJECT_MAPPING_ACTION_REORDERED
+    ACTION_CHOICES = SUBJECT_MAPPING_ACTION_CHOICES
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="subject_mapping_activities",
+        help_text="User who made the change",
+    )
+    image = models.ForeignKey(
+        Image,
+        on_delete=models.CASCADE,
+        related_name="subject_mapping_activities",
+    )
+    subject = models.ForeignKey(
+        "subjects.Subject",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="mapping_activities",
+        help_text="Subject added or removed (null for reorder activities)",
+    )
+    action = models.CharField(max_length=20, choices=SUBJECT_MAPPING_ACTION_CHOICES)
+    previous_order = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="List of subject IDs in their order before a reorder (reorder only)",
+    )
+    new_order = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="List of subject IDs in their order after a reorder (reorder only)",
+    )
+    group = models.ForeignKey(
+        "activity.SubjectMappingActivityGroup",
+        on_delete=models.CASCADE,
+        related_name="members",
+        null=True,
+        blank=True,
+        help_text="The activity group this activity belongs to",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    def __str__(self):
+        return f"{self.user} {self.action} on image {self.image_id}"
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["-created_at"]),
+            models.Index(fields=["image", "-created_at"]),
+            models.Index(fields=["user", "-created_at"]),
+        ]
+
+
 class Comment(models.Model):
     """Comments on images"""
 
@@ -1065,17 +1223,6 @@ class ImageRating(models.Model):
             models.Index(fields=["image"]),
             models.Index(fields=["user"]),
         ]
-
-
-@receiver(post_delete, sender=SubjectMapping)
-def clear_representative_image_on_mapping_delete(sender, instance, **kwargs):
-    """If a subject's representative image loses its mapping, clear the representative."""
-    from subjects.models import Subject
-
-    Subject.objects.filter(
-        pk=instance.subject_id,
-        representative_image_id=instance.image_id,
-    ).update(representative_image=None)
 
 
 @receiver([post_save, post_delete], sender=ImageSkip)

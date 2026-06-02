@@ -63,9 +63,7 @@ document.addEventListener("DOMContentLoaded", function () {
       const zoom = "18";
       mapswapLink.href = `https://mapswap.trailsta.sh/swap/#type=m&url=geo:${lat},${lng};z=${zoom}`;
     } else {
-      // No georeferencing - set default link to Richmond, VA
-      mapswapLink.href =
-        "https://mapswap.trailsta.sh/swap/#type=m&url=geo:33.98007,-117.3778;z=12";
+      mapswapLink.href = `https://mapswap.trailsta.sh/swap/#type=m&url=geo:${config.defaultMapLat},${config.defaultMapLng};z=${config.defaultMapZoom}`;
     }
   }
 

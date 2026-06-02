@@ -19,11 +19,11 @@ from images.models import (
     Georeference,
     GeoreferenceValidation,
     Image,
+    License,
     Source,
     SubjectMapping,
 )
-from subjects.models import OsmElement, Subject
-
+from subjects.models import OsmElement, Subject, WikidataItem
 
 POLYGON_COORDS = (
     (-77.44, 37.53),
@@ -150,10 +150,15 @@ class ApiFixturesMixin:
             img.refresh_from_db()
 
         # -- Subject + mapping --
+        cls.wikidata_item = WikidataItem.objects.create(
+            wikidata_id="Q1",
+            title="Main Street",
+        )
         cls.subject = Subject.objects.create(
             title="Main Street",
             slug="main-street",
             description="A major thoroughfare.",
+            wikidata_item=cls.wikidata_item,
         )
         SubjectMapping.objects.create(image=cls.img1, subject=cls.subject)
         cls.osm_element = OsmElement.objects.create(
@@ -562,10 +567,15 @@ class TestSubjectsEndpoint(ApiFixturesMixin, TestCase):
     def test_geometry_empty_subject(self):
         """Geometry endpoint returns empty FeatureCollection for subject with no OSM elements."""
         # Create a subject with an image mapping but no OsmElements
+        wd2 = WikidataItem.objects.create(
+            wikidata_id="Q2",
+            title="Empty Subject",
+        )
         subj2 = Subject.objects.create(
             title="Empty Subject",
             slug="empty",
             description="No geometry.",
+            wikidata_item=wd2,
         )
         SubjectMapping.objects.create(image=self.img2, subject=subj2)
         resp = self.client.get(f"/api/v2/subjects/{subj2.pk}/geometry/")
@@ -576,6 +586,58 @@ class TestSubjectsEndpoint(ApiFixturesMixin, TestCase):
         """Geometry endpoint returns 404 for a subject that does not exist."""
         resp = self.client.get("/api/v2/subjects/999999/geometry/")
         self.assertEqual(resp.status_code, 404)
+
+
+# ---------------------------------------------------------------------------
+# Licenses
+# ---------------------------------------------------------------------------
+
+
+class TestLicensesEndpoint(TestCase):
+    # Note: a data migration seeds Flickr's 17 default licenses, so tests
+    # assert against named fixtures rather than exact counts.
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.test_a = License.objects.create(
+            name="Test License A",
+            display_name="Test License A (display)",
+            permalink="https://example.com/a",
+        )
+        cls.test_b = License.objects.create(
+            name="Test License B",
+            display_name="Test License B (display)",
+        )
+
+    def test_list_status(self):
+        resp = self.client.get("/api/v2/licenses/")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_list_is_unpaginated(self):
+        """The endpoint returns a plain list, not a paginated envelope."""
+        resp = self.client.get("/api/v2/licenses/")
+        body = resp.json()
+        self.assertIsInstance(body, list)
+        names = [item["name"] for item in body]
+        self.assertIn("Test License A", names)
+        self.assertIn("Test License B", names)
+
+    def test_response_fields(self):
+        resp = self.client.get("/api/v2/licenses/")
+        by_name = {item["name"]: item for item in resp.json()}
+        item = by_name["Test License A"]
+        self.assertEqual(item["display_name"], "Test License A (display)")
+        self.assertEqual(item["permalink"], "https://example.com/a")
+
+    def test_ordering_by_name(self):
+        resp = self.client.get("/api/v2/licenses/")
+        names = [item["name"] for item in resp.json()]
+        self.assertEqual(names, sorted(names))
+
+    def test_detail(self):
+        resp = self.client.get(f"/api/v2/licenses/{self.test_a.pk}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["name"], "Test License A")
 
 
 # ---------------------------------------------------------------------------

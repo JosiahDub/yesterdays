@@ -1,21 +1,107 @@
 import json
+import logging
 
 import numpy as np
+import requests
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.db import connection, models, transaction
-from django.db.models import Case, IntegerField, Q, Value, When
+from django.db.models import Case, Count, IntegerField, Q, Value, When
 from django.db.models.functions import Lower
-from django.http import JsonResponse
+from django.http import HttpResponseBadRequest, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
+from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 from django_ratelimit.decorators import ratelimit
 
-from images.models import Image, SubjectMapping
+from activity.models import (
+    GROUPING_WINDOW,
+    SubjectIntroduction,
+    SubjectMappingActivityGroup,
+)
+from images.models import Image, SubjectMapping, SubjectMappingActivity
 
-from .models import Subject, WikidataItem
+from .models import Subject, SubjectAncestor, WikidataItem
+from .oxigraph import OxigraphClient
+from .project_graph import PROJECT_GRAPH_IRI, SUBJECT_CLASS_IRI
+from .sparql_safety import (
+    UnsafeSparqlInput,
+    sparql_string_literal,
+    sparql_wikidata_entity_iri,
+    validate_qid,
+)
+from .subject_facts import fetch_subject_facts
+from .wikidata_closure import iri_to_qid
+
+logger = logging.getLogger(__name__)
+
+
+def _record_subject_activity(
+    *, user, image, subject, action, previous_order=None, new_order=None
+):
+    """Record a SubjectMappingActivity and attach it to a group.
+
+    Adds and removes are bunched into a group with matching (user, subject,
+    action) whose `ended_at` is within GROUPING_WINDOW. Reorders always
+    create their own count=1 group.
+    """
+    now = timezone.now()
+
+    if action == SubjectMappingActivity.ACTION_REORDERED:
+        group = SubjectMappingActivityGroup.objects.create(
+            user=user,
+            subject=None,
+            action=action,
+            started_at=now,
+            ended_at=now,
+            count=1,
+        )
+    else:
+        latest_group = (
+            SubjectMappingActivityGroup.objects.filter(
+                user=user, subject=subject, action=action
+            )
+            .order_by("-ended_at")
+            .first()
+        )
+        if latest_group and (now - latest_group.ended_at) < GROUPING_WINDOW:
+            latest_group.ended_at = now
+            latest_group.count += 1
+            latest_group.save(update_fields=["ended_at", "count"])
+            group = latest_group
+        else:
+            group = SubjectMappingActivityGroup.objects.create(
+                user=user,
+                subject=subject,
+                action=action,
+                started_at=now,
+                ended_at=now,
+                count=1,
+            )
+
+    activity = SubjectMappingActivity.objects.create(
+        user=user,
+        image=image,
+        subject=subject,
+        action=action,
+        previous_order=previous_order,
+        new_order=new_order,
+        group=group,
+    )
+
+    if (
+        action == SubjectMappingActivity.ACTION_ADDED
+        and subject is not None
+        and SubjectMapping.objects.filter(subject=subject).count() == 1
+    ):
+        SubjectIntroduction.objects.get_or_create(
+            subject=subject,
+            defaults={"user": user, "image": image, "created_at": now},
+        )
+
+    return activity
 
 
 def subject_autocomplete(request):
@@ -45,6 +131,124 @@ def subject_autocomplete(request):
         results.append(result)
 
     return JsonResponse(results, safe=False)
+
+
+# SPARQL CONSTRUCT for the subjects half of the browse-page autocomplete.
+# Uses LCASE+CONTAINS for case-insensitive substring match against English
+# labels in the per-entity graphs.
+_BROWSE_AUTOCOMPLETE_SUBJECTS_QUERY = """\
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX project: <urn:yesterdays:>
+
+SELECT ?subject ?label WHERE {{
+  GRAPH <{project_graph}> {{ ?subject a <{subject_class}> . }}
+  ?subject rdfs:label ?label .
+  FILTER(LANG(?label) = "en")
+  FILTER(CONTAINS(LCASE(STR(?label)), LCASE({q_literal})))
+}}
+ORDER BY ?label
+LIMIT 10
+"""
+
+# Top-of-hierarchy Wikidata classes that appear in nearly every entity's
+# P31/P279* closure but are too abstract to be useful filters. They get
+# stripped out of the category autocomplete.
+_AUTOCOMPLETE_CATEGORY_DENYLIST = (
+    "Q35120",  # entity
+    "Q488383",  # object
+    "Q4406616",  # concrete object
+    "Q830077",  # subject (philosophy)
+    "Q99527517",  # collective entity
+    "Q124711467",  # immaterial entity
+    "Q58415929",  # spatio-temporal entity
+    "Q27096235",  # artificial geographic entity
+    "Q27096213",  # geographic entity
+    "Q7048977",  # abstract entity
+    "Q53617407",  # material entity
+    "Q123349660",  # geolocatable entity
+    "Q386724",  # work
+    "Q17537576",  # creative work
+    "Q15621286",  # intellectual work
+)
+
+
+def browse_autocomplete(request):
+    """JSON autocomplete for the subject browse page.
+
+    Returns both ``subjects`` (Wikidata-entity Subjects whose label matches)
+    and ``categories`` (ancestors of any Subject whose label matches,
+    ranked by subject-count). Subjects are returned with their Django slug
+    so the frontend can navigate directly; categories with their Q-ID so
+    the frontend can apply a ``?category=`` filter.
+
+    Subjects come from Oxigraph; categories come from the ``SubjectAncestor``
+    materialization in Postgres (indexed substring match against the
+    mirrored English label in ``WikidataItem.title``, no SPARQL property-
+    path traversal per request).
+    """
+    q = (request.GET.get("q") or "").strip()
+    if len(q) < 2:
+        return JsonResponse({"categories": [], "subjects": []})
+
+    try:
+        q_literal = sparql_string_literal(q)
+    except UnsafeSparqlInput as e:
+        return HttpResponseBadRequest(f"invalid q: {e}")
+
+    subjects_query = _BROWSE_AUTOCOMPLETE_SUBJECTS_QUERY.format(
+        project_graph=PROJECT_GRAPH_IRI,
+        subject_class=SUBJECT_CLASS_IRI,
+        q_literal=q_literal,
+    )
+
+    try:
+        with OxigraphClient() as client:
+            subject_rows = client.select(subjects_query)
+    except requests.RequestException as e:
+        logger.warning("Oxigraph autocomplete subjects query failed: %s", e)
+        subject_rows = []
+
+    matched_qids = [iri_to_qid(row["subject"]) for row in subject_rows]
+    subjects_by_qid = {
+        s.wikidata_item.wikidata_id: s
+        for s in Subject.objects.select_related("wikidata_item").filter(
+            wikidata_item__wikidata_id__in=matched_qids
+        )
+    }
+    subjects_data = []
+    for qid in matched_qids:
+        s = subjects_by_qid.get(qid)
+        if s is None:
+            continue
+        subjects_data.append(
+            {
+                "slug": s.slug,
+                "title": s.title,
+                "wikidata_id": qid,
+            }
+        )
+
+    # ``ancestor__subject__isnull=True`` excludes ancestors that are
+    # themselves project Subjects — they belong in the subjects half of
+    # the dropdown, not the categories half. Equivalent to the old
+    # ``FILTER NOT EXISTS { GRAPH <project_graph> { ?ancestor a Subject } }``.
+    categories_data = [
+        {
+            "qid": row["ancestor__wikidata_id"],
+            "label": row["ancestor__title"],
+            "subject_count": row["n"],
+        }
+        for row in (
+            SubjectAncestor.objects.filter(ancestor__title__icontains=q)
+            .exclude(ancestor__wikidata_id__in=_AUTOCOMPLETE_CATEGORY_DENYLIST)
+            .filter(ancestor__subject__isnull=True)
+            .values("ancestor__wikidata_id", "ancestor__title")
+            .annotate(n=Count("subject", distinct=True))
+            .order_by("-n", "ancestor__title")[:10]
+        )
+    ]
+
+    return JsonResponse({"categories": categories_data, "subjects": subjects_data})
 
 
 def wikidata_lookup(request):
@@ -185,6 +389,12 @@ def bulk_add_subject_to_images(request):
                         subject=subject,
                         order=max_order + 1,
                     )
+                    _record_subject_activity(
+                        user=request.user,
+                        image=image,
+                        subject=subject,
+                        action=SubjectMappingActivity.ACTION_ADDED,
+                    )
                     added_count += 1
 
                 except Image.DoesNotExist:
@@ -287,6 +497,12 @@ def add_subject_to_image(request, image_id):
         subject_mapping = SubjectMapping.objects.create(
             image=image, subject=subject, order=max_order + 1
         )
+        _record_subject_activity(
+            user=request.user,
+            image=image,
+            subject=subject,
+            action=SubjectMappingActivity.ACTION_ADDED,
+        )
 
         # Render the subject card partial for live insertion
         html = render_to_string(
@@ -326,12 +542,17 @@ def remove_subject_from_image(request, subject_mapping_id):
         # Find the specific subject mapping by its ID
         subject_relation = get_object_or_404(SubjectMapping, id=subject_mapping_id)
         subject_title = subject_relation.subject.title
-
-        # Although we're not using the image for lookup, it's good practice
-        # to ensure it exists, though get_object_or_404 handles this implicitly.
-        # image = subject_relation.image
+        removed_image = subject_relation.image
+        removed_subject = subject_relation.subject
 
         subject_relation.delete()
+
+        _record_subject_activity(
+            user=request.user,
+            image=removed_image,
+            subject=removed_subject,
+            action=SubjectMappingActivity.ACTION_REMOVED,
+        )
 
         return JsonResponse(
             {
@@ -408,8 +629,12 @@ def reorder_subjects(request, image_id):
             )
 
         with transaction.atomic():
-            # Get all subject relations for this image
-            subject_relations = SubjectMapping.objects.filter(image=image)
+            # Get all subject relations for this image, in their current order
+            subject_relations = list(
+                SubjectMapping.objects.filter(image=image).order_by(
+                    "order", "subject__title"
+                )
+            )
 
             # Create a map of ID to instance
             relation_map = {
@@ -426,12 +651,25 @@ def reorder_subjects(request, image_id):
                     status=400,
                 )
 
+            previous_subject_ids = [r.subject_id for r in subject_relations]
+            new_subject_ids = [relation_map[str(rid)].subject_id for rid in ordered_ids]
+
             # Update the order field based on the new order
             for index, subject_relation_id in enumerate(ordered_ids):
                 relation = relation_map.get(str(subject_relation_id))
                 if relation:
                     relation.order = index
                     relation.save(update_fields=["order"])
+
+            if previous_subject_ids != new_subject_ids:
+                _record_subject_activity(
+                    user=request.user,
+                    image=image,
+                    subject=None,
+                    action=SubjectMappingActivity.ACTION_REORDERED,
+                    previous_order=previous_subject_ids,
+                    new_order=new_subject_ids,
+                )
 
         return JsonResponse(
             {"success": True, "message": "Subject order updated successfully."}
@@ -454,7 +692,7 @@ def browse_subjects(request):
 
     subjects = (
         Subject.objects.all()
-        .select_related("wikidata_item")
+        .select_related("wikidata_item", "representative_image")
         .annotate(
             total_images=models.Count(
                 "image_mappings",
@@ -499,6 +737,44 @@ def browse_subjects(request):
             else 0,
         }
 
+    # Apply category filter via the SubjectAncestor materialization. If the
+    # category Q-ID is itself a project Subject, include it too and pin it
+    # to the top of the page (it won't be in its own ancestor table).
+    category_qid = (request.GET.get("category") or "").strip()
+    selected_category = None
+    if category_qid:
+        try:
+            validate_qid(category_qid)
+        except UnsafeSparqlInput:
+            return HttpResponseBadRequest("invalid category")
+
+        matching_subject_ids = SubjectAncestor.objects.filter(
+            ancestor__wikidata_id=category_qid,
+        ).values("subject_id")
+
+        category_item = WikidataItem.objects.filter(wikidata_id=category_qid).first()
+        category_label = (
+            category_item.title
+            if category_item and category_item.title
+            else category_qid
+        )
+        selected_category = {"qid": category_qid, "label": category_label}
+
+        subjects = (
+            subjects.filter(
+                Q(pk__in=matching_subject_ids)
+                | Q(wikidata_item__wikidata_id=category_qid),
+            )
+            .annotate(
+                _category_self=Case(
+                    When(wikidata_item__wikidata_id=category_qid, then=Value(0)),
+                    default=Value(1),
+                    output_field=IntegerField(),
+                ),
+            )
+            .order_by("_category_self", "-total_images", "title")
+        )
+
     # Apply search filter
     query = request.GET.get("filter", "").strip()
     if query:
@@ -514,10 +790,8 @@ def browse_subjects(request):
     has_more = len(subject_list) > PER_PAGE
     subject_list = subject_list[:PER_PAGE]
 
-    # Calculate pending_images and attach representative images
     for subject in subject_list:
         subject.pending_images = subject.total_images - subject.georeferenced_images
-        subject.representative = subject.get_representative_image()
 
     if is_ajax:
         return render(
@@ -531,6 +805,7 @@ def browse_subjects(request):
         "has_more": has_more,
         "per_page": PER_PAGE,
         "overall_stats": overall_stats,
+        "selected_category": selected_category,
     }
     return render(request, "subjects/browse_subjects.html", context)
 
@@ -538,6 +813,17 @@ def browse_subjects(request):
 def subject_detail(request, subject_slug):
     """Detail view for a specific subject showing its images"""
     subject = get_object_or_404(Subject, slug=subject_slug)
+
+    # Treat descendant subjects (those whose ancestors include this subject's
+    # WikidataItem) as more-specific instances of this subject — their images
+    # are folded into the listing here.
+    relevant_subject_ids = list(
+        Subject.objects.filter(
+            Q(pk=subject.pk) | Q(ancestors__ancestor=subject.wikidata_item)
+        )
+        .values_list("pk", flat=True)
+        .distinct()
+    )
 
     # Get filter parameters from URL
     georeference_status = (
@@ -559,10 +845,11 @@ def subject_detail(request, subject_slug):
     )
     no_subjects = request.GET.get("no_subjects") == "true"
 
-    # Get images associated with this subject (only from public collections, excluding duplicates)
+    # Get images associated with this subject or its descendants (only from
+    # public collections, excluding duplicates)
     images = (
         Image.objects.filter(
-            subject_mappings__subject=subject,
+            subject_mappings__subject_id__in=relevant_subject_ids,
             collection__public=True,
             collection__source__public=True,
             duplicate_of__isnull=True,
@@ -645,11 +932,11 @@ def subject_detail(request, subject_slug):
 
     # Get counts before filtering for statistics
     all_images = Image.objects.filter(
-        subject_mappings__subject=subject,
+        subject_mappings__subject_id__in=relevant_subject_ids,
         duplicate_of__isnull=True,
         collection__public=True,
         collection__source__public=True,
-    )
+    ).distinct()
     total_images = all_images.count()
     georeferenced_images = (
         all_images.filter(georeferences__isnull=False).distinct().count()
@@ -670,6 +957,12 @@ def subject_detail(request, subject_slug):
 
     representative_image = subject.get_representative_image()
 
+    wikidata_facts = (
+        fetch_subject_facts(subject.wikidata_item.wikidata_id)
+        if subject.wikidata_item_id
+        else {}
+    )
+
     context = {
         "subject": subject,
         "page_obj": page_obj,
@@ -681,6 +974,7 @@ def subject_detail(request, subject_slug):
         else 0,
         "has_images_with_embeddings": has_images_with_embeddings,
         "representative_image": representative_image,
+        "wikidata_facts": wikidata_facts,
     }
     return render(request, "subjects/subject_detail.html", context)
 
@@ -870,7 +1164,7 @@ def find_similar_images_to_subject(request, subject_slug):
             query_sql = f"""
                 SELECT
                     id,
-                    (embedding::vector <=> %s::vector) as distance
+                    (embedding::vector(768) <=> %s::vector(768)) as distance
                 FROM images_image
                 WHERE {where_clause}
                 AND id IN (
@@ -880,12 +1174,12 @@ def find_similar_images_to_subject(request, subject_slug):
                     JOIN images_source s ON c.source_id = s.id
                     WHERE c.public = true AND s.public = true AND i.duplicate_of_id IS NULL
                 )
-                ORDER BY distance, id ASC
+                ORDER BY embedding::vector(768) <=> %s::vector(768), id ASC
                 LIMIT %s OFFSET %s
             """
             cursor.execute(
                 query_sql,
-                [embedding_str] + where_params + [per_page, offset],
+                [embedding_str] + where_params + [embedding_str, per_page, offset],
             )
             page_results = cursor.fetchall()
 

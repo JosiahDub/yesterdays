@@ -1,9 +1,27 @@
+import ipaddress
 import json
+from urllib.parse import urlsplit
 
 from django.contrib.auth.models import User
-
+from django.core.exceptions import ValidationError as DjangoValidationError
+from edtf import parse_edtf
+from edtf.parser.edtf_exceptions import EDTFParseException
+from oauth2_provider.settings import oauth2_settings
+from oauth2_provider.validators import AllowedURIValidator
 from rest_framework import serializers
 from rest_framework_gis.serializers import GeoFeatureModelSerializer
+
+
+def _is_loopback_host(host):
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
 
 from images.models import (
     AerialGeoreference,
@@ -17,7 +35,6 @@ from images.models import (
     Source,
 )
 from subjects.models import OsmElement, Subject, WikidataItem
-
 
 # ---------------------------------------------------------------------------
 # Users
@@ -67,6 +84,7 @@ class SourceSerializer(serializers.ModelSerializer):
             "slug",
             "url",
             "description",
+            "public",
             "collection_count",
             "image_count",
             "collections_url",
@@ -104,6 +122,7 @@ class CollectionSerializer(serializers.ModelSerializer):
             "url",
             "description",
             "source",
+            "public",
             "image_count",
             "images_url",
         ]
@@ -131,7 +150,7 @@ class CollectionSummarySerializer(serializers.ModelSerializer):
 class LicenseSerializer(serializers.ModelSerializer):
     class Meta:
         model = License
-        fields = ["display_name", "permalink"]
+        fields = ["name", "display_name", "permalink"]
 
 
 class WikidataItemSerializer(serializers.ModelSerializer):
@@ -478,3 +497,131 @@ class ImageListSerializer(serializers.ModelSerializer):
         if request:
             return request.build_absolute_uri(f"/api/v2/images/{obj.id}/")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Write serializers (import workstation)
+# ---------------------------------------------------------------------------
+
+
+class SourceCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Source
+        fields = ["id", "name", "slug", "url", "description", "public"]
+        read_only_fields = ["id", "slug"]
+        extra_kwargs = {
+            "public": {"required": False, "default": False},
+        }
+
+
+class CollectionCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Collection
+        fields = ["id", "name", "slug", "source", "url", "description", "public"]
+        read_only_fields = ["id"]
+        extra_kwargs = {
+            "url": {"required": False, "default": ""},
+            "description": {"required": False, "default": ""},
+            "public": {"required": False, "default": False},
+        }
+
+
+class ImportCommitSerializer(serializers.Serializer):
+    slot_id = serializers.UUIDField()
+    title = serializers.CharField(max_length=500)
+    original_date = serializers.CharField(max_length=50)
+    edtf_date = serializers.CharField(max_length=50)
+    source_url = serializers.URLField(required=False, allow_blank=True, default="")
+    description = serializers.CharField(required=False, allow_blank=True, default="")
+    creator = serializers.CharField(
+        required=False, allow_blank=True, max_length=100, default=""
+    )
+    reference_id = serializers.CharField(
+        required=False, allow_blank=True, max_length=100, default=""
+    )
+    license_name = serializers.CharField(
+        required=False, allow_blank=True, max_length=500, default=""
+    )
+    rotation = serializers.ChoiceField(
+        choices=[0, 90, 180, 270], required=False, default=0
+    )
+    mirror = serializers.ChoiceField(
+        choices=["none", "h", "v"], required=False, default="none"
+    )
+
+    def validate_edtf_date(self, value):
+        try:
+            parsed = parse_edtf(value)
+        except EDTFParseException:
+            raise serializers.ValidationError(f"Invalid EDTF date: {value}")
+        if isinstance(parsed.lower_strict(), float) or isinstance(
+            parsed.upper_strict(), float
+        ):
+            raise serializers.ValidationError(
+                f'EDTF date "{value}" is open-ended; both a start and end '
+                "date are required."
+            )
+        return value
+
+    def validate_license_name(self, value):
+        if not value:
+            return value
+        if not License.objects.filter(name__iexact=value).exists():
+            raise serializers.ValidationError(f"License '{value}' is not recognized.")
+        return value
+
+
+class ImportCancelSerializer(serializers.Serializer):
+    slot_ids = serializers.ListField(
+        child=serializers.UUIDField(), min_length=1, max_length=100
+    )
+
+
+class ImageReplaceSerializer(serializers.Serializer):
+    slot_id = serializers.UUIDField()
+
+
+class AppRegistrationSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=255)
+    redirect_uris = serializers.CharField(
+        help_text="Space-separated list of redirect URIs."
+    )
+    client_type = serializers.ChoiceField(
+        choices=[("public", "public"), ("confidential", "confidential")],
+    )
+
+    def validate_redirect_uris(self, value):
+        uris = value.strip().split()
+        if not uris:
+            raise serializers.ValidationError("At least one redirect URI is required.")
+
+        allowed_schemes = {
+            s.lower() for s in oauth2_settings.ALLOWED_REDIRECT_URI_SCHEMES
+        }
+        validator = AllowedURIValidator(
+            allowed_schemes,
+            name="redirect uri",
+            allow_path=True,
+            allow_query=True,
+            allow_hostname_wildcard=oauth2_settings.ALLOW_URI_WILDCARDS,
+        )
+
+        errors = []
+        for uri in uris:
+            try:
+                validator(uri)
+            except DjangoValidationError as e:
+                msg = e.messages[0] if e.messages else "invalid URI"
+                errors.append(f"{uri}: {msg}")
+                continue
+
+            parts = urlsplit(uri)
+            if parts.scheme == "http" and not _is_loopback_host(parts.hostname):
+                errors.append(
+                    f"{uri}: http:// is only allowed for loopback addresses "
+                    f"(127.0.0.0/8, ::1, or localhost); use https:// otherwise"
+                )
+        if errors:
+            raise serializers.ValidationError(errors)
+
+        return " ".join(uris)

@@ -391,7 +391,13 @@ class R2Uploader:
                 raise R2UploaderError(f"Error checking file existence: {e}")
 
     def upload_url(
-        self, source_url, overwrite=False, timeout=30, in_tqdm=False, raise_on_err=True
+        self,
+        source_url,
+        overwrite=False,
+        timeout=30,
+        in_tqdm=False,
+        raise_on_err=True,
+        cache_control="public, max-age=31536000",
     ):
         """
         Download a file from URL and upload to R2 bucket
@@ -403,6 +409,7 @@ class R2Uploader:
             timeout (int): Timeout for downloading the source file
             in_tqdm (bool): If True, use tqdm to print messages
             raise_on_err (bool): If True, raise an Exception when there is a download error
+            cache_control (str): Cache-Control header to set on the uploaded object
 
         Returns:
             str: Public URL of the uploaded file
@@ -451,7 +458,7 @@ class R2Uploader:
                 key,
                 ExtraArgs={
                     "ContentType": content_type,
-                    "CacheControl": "public, max-age=31536000",  # Cache for 1 year
+                    "CacheControl": cache_control,
                 },
             )
 
@@ -476,7 +483,12 @@ class R2Uploader:
             raise R2UploaderError(f"Unexpected error during upload: {e}")
 
     def upload_file_content(
-        self, file_content, key, content_type=None, overwrite=False
+        self,
+        file_content,
+        key,
+        content_type=None,
+        overwrite=False,
+        cache_control="public, max-age=31536000",
     ):
         """
         Upload file content directly to R2 bucket
@@ -486,6 +498,7 @@ class R2Uploader:
             key (str): S3 key (path) where to store the file in the bucket
             content_type (str): MIME type of the file (optional)
             overwrite (bool): Whether to overwrite existing files
+            cache_control (str): Cache-Control header to set on the uploaded object
 
         Returns:
             str: Public URL of the uploaded file
@@ -513,7 +526,7 @@ class R2Uploader:
                 key,
                 ExtraArgs={
                     "ContentType": content_type,
-                    "CacheControl": "public, max-age=31536000",  # Cache for 1 year
+                    "CacheControl": cache_control,
                 },
             )
 
@@ -546,7 +559,37 @@ class R2Uploader:
         except ClientError as e:
             raise R2UploaderError(f"Failed to delete from R2: {e}")
 
-    def upload_original(self, image_id, source_url, timeout=30, in_tqdm=False):
+    def iter_keys(self, prefix):
+        """Yield every object key in the bucket that begins with *prefix*."""
+        paginator = self.s3_client.get_paginator("list_objects_v2")
+        try:
+            for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix):
+                for obj in page.get("Contents", []) or []:
+                    yield obj["Key"]
+        except ClientError as e:
+            raise R2UploaderError(f"Failed to list R2 objects: {e}")
+
+    def delete_files(self, keys):
+        """Delete many objects in batches of 1000 (the S3 DeleteObjects limit)."""
+        batch = []
+        for key in keys:
+            batch.append({"Key": key})
+            if len(batch) == 1000:
+                self._delete_batch(batch)
+                batch = []
+        if batch:
+            self._delete_batch(batch)
+
+    def _delete_batch(self, batch):
+        try:
+            self.s3_client.delete_objects(
+                Bucket=self.bucket_name,
+                Delete={"Objects": batch, "Quiet": True},
+            )
+        except ClientError as e:
+            raise R2UploaderError(f"Failed to delete R2 objects: {e}")
+
+    def upload_original(self, image_id, source_url, timeout=30, in_tqdm=False, max_retries=3):
         """
         Download a file from URL and upload to R2 at images/<ID>/original.<ext>.
 
@@ -555,6 +598,8 @@ class R2Uploader:
             source_url (str): URL to download the file from
             timeout (int): Timeout for downloading the source file
             in_tqdm (bool): If True, use tqdm to print messages
+            max_retries (int): Number of attempts for the source download on
+                transient failures (5xx, connection/timeout errors)
 
         Returns:
             str: Public URL of the uploaded file, or None on download failure
@@ -570,11 +615,31 @@ class R2Uploader:
 
         _print = tqdm.write if in_tqdm else print
 
-        try:
-            _print(f"  Downloading from: {source_url}")
-            response = requests.get(source_url, timeout=timeout, stream=True)
-            response.raise_for_status()
+        response = None
+        for attempt in range(max_retries):
+            try:
+                _print(f"  Downloading from: {source_url}")
+                response = requests.get(source_url, timeout=timeout, stream=True)
+                response.raise_for_status()
+                break
+            except requests.RequestException as e:
+                status = e.response.status_code if e.response is not None else None
+                is_retryable = (
+                    isinstance(e, (requests.ConnectionError, requests.Timeout))
+                    or (status is not None and 500 <= status < 600)
+                )
+                if attempt + 1 < max_retries and is_retryable:
+                    delay = 2 ** attempt
+                    _print(
+                        f"  Download failed (attempt {attempt + 1}/{max_retries}, "
+                        f"retrying in {delay}s): {e}"
+                    )
+                    time.sleep(delay)
+                    continue
+                _print(f"Failed to download from {source_url}: {e}")
+                return None
 
+        try:
             file_content = response.content
 
             # Determine content type and extension
@@ -605,9 +670,6 @@ class R2Uploader:
             _print(f"  ✓ Uploaded to R2: {public_url}")
             return public_url
 
-        except requests.RequestException as e:
-            _print(f"Failed to download from {source_url}: {e}")
-            return None
         except ClientError as e:
             raise R2UploaderError(f"Failed to upload to R2: {e}")
 
@@ -638,6 +700,28 @@ class R2Uploader:
         else:
             # Fallback to constructing URL from endpoint
             return f"{self.endpoint_url}/{self.bucket_name}/{key}"
+
+    def head_object(self, key):
+        """Return metadata for an S3 object, or None if it doesn't exist."""
+        try:
+            return self.s3_client.head_object(Bucket=self.bucket_name, Key=key)
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "404":
+                return None
+            raise
+
+    def copy_object(self, source_key, dest_key):
+        """Copy an object within the same bucket.
+
+        Returns:
+            str: Public URL of the destination object
+        """
+        self.s3_client.copy_object(
+            Bucket=self.bucket_name,
+            CopySource={"Bucket": self.bucket_name, "Key": source_key},
+            Key=dest_key,
+        )
+        return self.get_public_url(dest_key)
 
     def generate_key_from_url(self, source_url) -> str:
         """
