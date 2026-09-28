@@ -256,9 +256,10 @@ def source_detail(request, slug):
         georeferenced_images += collection.georeferenced_images
         will_not_georef_images += collection.will_not_georef_images
 
-    # Stable sort retains alphabetical ordering for equal regional counts.
-    if region is not None:
-        collections.sort(key=lambda collection: -collection.total_images)
+    # Largest collections first — in the selected region when there is one, since
+    # total_images is regional then. Python's stable sort keeps the alphabetical
+    # ordering from the queryset for collections with equal image counts.
+    collections.sort(key=lambda collection: -collection.total_images)
 
     preview_images = Image.objects.filter(
         collection__source=source, collection__public=True
