@@ -196,7 +196,14 @@ export function initRegionMap({
   // Markers rather than a GeoJSON source and symbol layer: they're DOM
   // overlays, so they survive the setStyle below, and the region list is
   // small enough that the per-pin element cost doesn't matter.
-  for (const region of summaries) {
+  //
+  // Fewest photos first: markers stack in DOM order, so the busiest
+  // region is added last and sits on top where pins overlap. (DOM order
+  // rather than z-index, which would lift pins above their own popups.)
+  const byImageCount = [...summaries].sort(
+    (a, b) => a.image_count - b.image_count,
+  );
+  for (const region of byImageCount) {
     const markerElement = buildMarkerElement(region);
     new maplibregl.Marker({ element: markerElement })
       .setLngLat([region.lng, region.lat])
