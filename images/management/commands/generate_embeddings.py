@@ -2,23 +2,25 @@
 Django management command to generate CLIP embeddings for images.
 
 Embeddings are produced by the CLIP microservice (services/clip), reached via
-``CLIP_SERVICE_URL``. This command downloads each image and posts its bytes to
-the service; the service handles preprocessing and encoding.
+``CLIP_SERVICE_URL``. This command downloads each image, shrinks it, and posts
+it to the service; the service handles preprocessing and encoding.
+
+With ``--queue`` the work is handed to the background Celery queue instead of
+running in this process.
 
 Usage:
     python manage.py generate_embeddings [--batch-size 100] [--concurrency 8]
-                                         [--force] [--image-ids 1,2,3]
+                                         [--force] [--image-ids 1,2,3] [--queue]
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from io import BytesIO
 from itertools import islice
 
-import requests
 from django.core.management.base import BaseCommand, CommandError
 
 from images import clip_client
 from images.models import Image
+from images.tasks import embed_image_url, generate_embeddings_batch
 
 
 class Command(BaseCommand):
@@ -51,6 +53,11 @@ class Command(BaseCommand):
             type=str,
             help="Comma-separated list of specific image IDs to process",
         )
+        parser.add_argument(
+            "--queue",
+            action="store_true",
+            help="Queue a background Celery task instead of running here",
+        )
 
     def handle(self, *args, **options):
         if not clip_client.is_configured():
@@ -64,6 +71,22 @@ class Command(BaseCommand):
 
         if total_images == 0:
             self.stdout.write(self.style.WARNING("No images found to process."))
+            return
+
+        if options["queue"]:
+            # options["image_ids"] is a list[int] (or None) by now:
+            # get_images_queryset() parsed the --image-ids string in place.
+            # The task receives it as-is, so it must stay JSON-serializable.
+            # --batch-size and --concurrency don't apply here; the task
+            # uses its own EMBEDDING_TASK_BATCH_SIZE and runs serially.
+            generate_embeddings_batch.delay(
+                force=options["force"], image_ids=options["image_ids"]
+            )
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"Queued embedding generation for {total_images} images"
+                )
+            )
             return
 
         batch_size = options["batch_size"]
@@ -105,13 +128,18 @@ class Command(BaseCommand):
         queryset = Image.objects.only("id", "permalink", "embedding")
 
         if options["image_ids"]:
+            # Overwrite the raw "1,2,3" string with the parsed list[int] so
+            # that handle() can pass it straight to generate_embeddings_batch
+            # for --queue. Don't re-parse options["image_ids"] after this.
             try:
-                image_ids = [int(id.strip()) for id in options["image_ids"].split(",")]
-                queryset = queryset.filter(id__in=image_ids)
+                options["image_ids"] = [
+                    int(id.strip()) for id in options["image_ids"].split(",")
+                ]
             except ValueError:
                 raise CommandError(
                     "Invalid image IDs format. Use comma-separated integers."
                 )
+            queryset = queryset.filter(id__in=options["image_ids"])
 
         # Filter out images that already have embeddings unless --force is used
         if not options["force"]:
@@ -130,38 +158,16 @@ class Command(BaseCommand):
         return len(successful_images), len(batch_images) - len(successful_images)
 
     def embed_image(self, image):
-        """Download an image and set its embedding from the service.
+        """Set an image's embedding from the service.
 
         Returns the mutated Image on success (for bulk_update), or None on
         failure (already logged).
         """
         try:
-            image_bytes = self.download_image(image.permalink)
-            if image_bytes is None:
-                return None
-            image.embedding = clip_client.get_image_embedding(image_bytes)
+            image.embedding = embed_image_url(image.permalink)
             return image
         except Exception as e:
             self.stderr.write(
                 self.style.ERROR(f"Error processing image {image.id}: {e}")
             )
-            return None
-
-    def download_image(self, url: str, timeout: int = 30) -> bytes | None:
-        """Download an image from URL and return its raw bytes."""
-        try:
-            response = requests.get(url, timeout=timeout)
-            response.raise_for_status()
-
-            content_type = response.headers.get("content-type", "").lower()
-            if not content_type.startswith("image/"):
-                self.stderr.write(
-                    self.style.WARNING(f"URL does not return an image: {url}")
-                )
-                return None
-
-            return BytesIO(response.content).getvalue()
-
-        except requests.RequestException as e:
-            self.stderr.write(self.style.WARNING(f"Failed to download {url}: {e}"))
             return None

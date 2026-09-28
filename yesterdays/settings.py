@@ -351,6 +351,7 @@ CELERY_TASK_ROUTES = {
     "images.tasks.reconcile_collection_region_stats": {"queue": "background"},
     "images.tasks.refresh_collection_embedding_stats": {"queue": "background"},
     "images.tasks.refresh_next_collection_embedding_stats": {"queue": "background"},
+    "images.tasks.generate_embeddings_batch": {"queue": "background"},
     "images.tasks.refresh_duplicate_image_pairs": {"queue": "background"},
     # First-time Wikidata closure hydration fires off a request thread
     # right after a new WikidataItem is saved; the user is waiting on the

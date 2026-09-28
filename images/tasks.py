@@ -1,4 +1,5 @@
 import logging
+import time
 import uuid
 from datetime import timedelta
 from io import BytesIO
@@ -21,6 +22,7 @@ from PIL import Image as PILImage
 
 from yesterdays.iiif import generate_and_upload_iiif_tiles
 
+from . import clip_client
 from .models import (
     CollectionEmbeddingStats,
     CollectionRegionStats,
@@ -37,6 +39,17 @@ logger = logging.getLogger(__name__)
 # reconcile below drops it. An internal safety margin against deleting a row a
 # concurrent refresh is about to rewrite, not a tunable.
 EMPTY_REGION_STATS_TTL = timedelta(days=1)
+
+# Maximum side of the central square sent to CLIP. Cropping before shrinking
+# preserves detail in panoramas: the service resizes the shortest edge to
+# 336px and center-crops, so it would discard the outer regions anyway.
+EMBEDDING_MAX_DIMENSION = 1024
+
+# Images per generate_embeddings_batch run, and how long one run may spend
+# encoding before handing the rest to its successor. The budget leaves room for
+# one more slow image (download + CLIP timeouts) under CELERY_TASK_SOFT_TIME_LIMIT.
+EMBEDDING_TASK_BATCH_SIZE = 50
+EMBEDDING_TASK_TIME_BUDGET = 120
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60, ignore_result=True)
@@ -250,6 +263,35 @@ def download_image(url: str, timeout: int = 30) -> PILImage.Image | None:
         return to_rgb(PILImage.open(image_data))
     except Exception:
         return None
+
+
+def embed_image_url(url: str, timeout: int = 30) -> list[float]:
+    """Download an image, prepare its central crop, and return its CLIP embedding.
+
+    Raises on any failure (download, non-image response, decode, or the CLIP
+    service itself); callers decide how to report it.
+    """
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+
+    content_type = response.headers.get("content-type", "").lower()
+    if not content_type.startswith("image/"):
+        raise ValueError(f"URL does not return an image: {url}")
+
+    with PILImage.open(BytesIO(response.content)) as img:
+        img = to_rgb(img)
+    side = min(img.size)
+    left = (img.width - side) // 2
+    top = (img.height - side) // 2
+    img = img.crop((left, top, left + side, top + side))
+    img.thumbnail(
+        (EMBEDDING_MAX_DIMENSION, EMBEDDING_MAX_DIMENSION),
+        PILImage.Resampling.LANCZOS,
+    )
+
+    output = BytesIO()
+    img.save(output, format="PNG")
+    return clip_client.get_image_embedding(output.getvalue())
 
 
 def create_thumbnail(img: PILImage.Image, max_dimension: int = 500) -> PILImage.Image:
@@ -565,6 +607,55 @@ def refresh_next_collection_embedding_stats():
         row = cursor.fetchone()
     if row:
         CollectionEmbeddingStats.refresh_for([row[0]])
+
+
+@shared_task(ignore_result=True)
+def generate_embeddings_batch(
+    after_id: int = 0,
+    force: bool = False,
+    image_ids: list[int] | None = None,
+):
+    """Generate CLIP embeddings for images lacking one, then queue the rest.
+
+    Works through up to EMBEDDING_TASK_BATCH_SIZE images in id order, stopping
+    early once EMBEDDING_TASK_TIME_BUDGET is spent, and re-queues itself to
+    continue after the last image it reached. As a single self-requeuing chain
+    it keeps one request in flight against the CLIP service (which encodes
+    serially per replica) however many worker processes are idle. Failures are
+    logged and skipped, so they stay embedding-less for a later run to retry.
+
+    Args:
+        after_id: Resume after this image id
+        force: Also regenerate images that already have an embedding
+        image_ids: Optional specific image IDs to process
+    """
+    if not clip_client.is_configured():
+        logger.warning("CLIP_SERVICE_URL is not set; skipping embedding generation")
+        return
+
+    queryset = Image.objects.filter(id__gt=after_id).only("id", "permalink")
+    if not force:
+        queryset = queryset.filter(embedding__isnull=True)
+    if image_ids:
+        queryset = queryset.filter(id__in=image_ids)
+    batch = list(queryset.order_by("id")[:EMBEDDING_TASK_BATCH_SIZE])
+    if not batch:
+        return
+
+    deadline = time.monotonic() + EMBEDDING_TASK_TIME_BUDGET
+    last_id = after_id
+    for image in batch:
+        if time.monotonic() > deadline:
+            break
+        last_id = image.id
+        try:
+            embedding = embed_image_url(image.permalink)
+        except Exception as e:
+            logger.warning("Failed to embed image %s: %s", image.id, e)
+            continue
+        Image.objects.filter(pk=image.id).update(embedding=embedding)
+
+    generate_embeddings_batch.delay(after_id=last_id, force=force, image_ids=image_ids)
 
 
 @shared_task(ignore_result=True)
