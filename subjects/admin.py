@@ -14,8 +14,22 @@ from .models import (
     OsmElement,
     Person,
     Subject,
+    WikidataAlias,
     WikidataItem,
 )
+
+
+class WikidataAliasInline(admin.TabularInline):
+    """Read-only: aliases are mirrored from Wikidata on each closure load."""
+
+    model = WikidataAlias
+    extra = 0
+    fields = ("language", "alias")
+    readonly_fields = ("language", "alias")
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(WikidataItem)
@@ -30,8 +44,15 @@ class WikidataItemAdmin(admin.ModelAdmin):
         "last_updated",
     )
     list_filter = ("last_updated", "inception", "demolished")
-    search_fields = ("wikidata_id", "title", "description", "va_landmark_id")
+    search_fields = (
+        "wikidata_id",
+        "title",
+        "description",
+        "va_landmark_id",
+        "aliases__alias",
+    )
     readonly_fields = ("created_at", "last_updated", "wikidata_url", "refresh_button")
+    inlines = [WikidataAliasInline]
     actions = ["refresh_selected_wikidata_items"]
 
     def get_urls(self):

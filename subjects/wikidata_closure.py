@@ -992,6 +992,8 @@ def commit_closure_to_memgraph(
     - ``bulk_create``s ``WikidataItem`` rows for newly-encountered
       ancestors. ``bulk_create`` bypasses ``save()`` so we don't fan out
       one closure-fetch per ancestor.
+    - Syncs ``WikidataAlias`` rows for every Q-entity in the closure,
+      seed included.
 
     Returns the number of new ancestor rows created.
     """
@@ -999,6 +1001,7 @@ def commit_closure_to_memgraph(
 
     from .memgraph import MemgraphClient, ensure_schema
     from .models import WikidataItem
+    from .wikidata_aliases import aliases_from_payload, sync_wikidata_aliases
 
     payload = build_graph_payload(groups)
 
@@ -1052,5 +1055,9 @@ def commit_closure_to_memgraph(
     ]
     if new_items:
         WikidataItem.objects.bulk_create(new_items)
+
+    # Unlike the title refresh above, this includes the seed: every caller
+    # has written the seed's row by now, and its aliases are needed too.
+    sync_wikidata_aliases(aliases_from_payload(payload["entities"]))
 
     return len(new_items)

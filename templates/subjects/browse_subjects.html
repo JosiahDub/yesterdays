@@ -80,8 +80,12 @@
                                 <h6 class="dropdown-header mb-0">Subjects</h6>
                                 <template x-for="subj in suggestions.subjects" :key="subj.slug">
                                     <a class="dropdown-item"
-                                       :href="'/subjects/' + subj.slug + '/'"
-                                       x-text="subj.title"></a>
+                                       :href="'/subjects/' + subj.slug + '/'">
+                                        <span x-text="subj.title"></span>
+                                        <small class="text-muted"
+                                               x-show="subj.matched_alias"
+                                               x-text="'aka ' + subj.matched_alias"></small>
+                                    </a>
                                 </template>
                             </div>
                         </template>
@@ -97,7 +101,12 @@
                                     <button type="button"
                                             class="dropdown-item d-flex justify-content-between align-items-center"
                                             @click="selectCategory(cat)">
-                                        <span x-text="cat.label"></span>
+                                        <span>
+                                            <span x-text="cat.label"></span>
+                                            <small class="text-muted"
+                                                   x-show="cat.matched_alias"
+                                                   x-text="'aka ' + cat.matched_alias"></small>
+                                        </span>
                                         <span class="badge bg-secondary rounded-pill ms-2"
                                               x-text="cat.subject_count"></span>
                                     </button>

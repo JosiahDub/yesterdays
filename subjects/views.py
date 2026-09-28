@@ -2,7 +2,6 @@ import logging
 
 from django.conf import settings
 from django.contrib import messages
-from django.contrib.postgres.search import TrigramWordSimilarity
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.db import IntegrityError, connection, models, transaction
@@ -13,6 +12,7 @@ from django.db.models import (
     IntegerField,
     OuterRef,
     Q,
+    Subquery,
     Value,
     When,
 )
@@ -43,8 +43,8 @@ from images.policies import (
 from images.validation import InvalidInput, parse_json_body, validate_text
 from regions.context_processors import get_current_region
 
-from .memgraph import GRAPH_ERRORS, MemgraphClient
 from .models import Subject, SubjectAncestor, WikidataItem
+from .name_search import annotate_name_match
 from .similarity import build_subject_query_embedding
 from .sparql_safety import (
     UnsafeSparqlInput,
@@ -121,17 +121,25 @@ def _record_subject_activity(
     return activity
 
 
-# Queries longer than this are rejected outright by both autocompletes.
-# For ``browse_autocomplete`` the string travels as a Bolt parameter (no
-# escaping needed), so this is just a DoS bound, sized like the old SPARQL
-# free-text cap.
+# Queries longer than this are rejected outright by both autocompletes. The
+# string only ever travels as a query parameter, so this is just a DoS bound,
+# sized like the old SPARQL free-text cap.
 _MAX_AUTOCOMPLETE_QUERY_LEN = 100
 
-# Minimum ``word_similarity(query, title)`` for a fuzzy-only autocomplete
-# hit. Deliberately below Postgres's 0.3 default so a transposition in a
-# ~6-letter word still matches (``word_similarity('chruch', 'Church Hill')``
-# is about 0.27).
-_AUTOCOMPLETE_WORD_SIMILARITY_THRESHOLD = 0.25
+
+def _matching_subjects(query):
+    """Top ten Subjects by title-or-alias match, as both autocompletes list them."""
+    return (
+        annotate_name_match(
+            Subject.objects.all(),
+            query,
+            title_field="title",
+            item_field="wikidata_item",
+        )
+        .annotate(lower_title=Lower("title"))
+        .select_related("wikidata_item")
+        .order_by("match_rank", "-similarity", "lower_title")[:10]
+    )
 
 
 def subject_autocomplete(request):
@@ -142,30 +150,8 @@ def subject_autocomplete(request):
     if len(query) < 2 or len(query) > _MAX_AUTOCOMPLETE_QUERY_LEN:
         return JsonResponse([], safe=False)
 
-    # Literal matches (exact, then prefix, then substring) always rank
-    # above fuzzy-only trigram hits; word similarity orders within a tier.
-    subjects = (
-        Subject.objects.annotate(
-            similarity=TrigramWordSimilarity(query, "title"),
-            match_rank=Case(
-                When(title__iexact=query, then=Value(0)),
-                When(title__istartswith=query, then=Value(1)),
-                When(title__icontains=query, then=Value(2)),
-                default=Value(3),
-                output_field=IntegerField(),
-            ),
-            lower_title=Lower("title"),
-        )
-        .filter(
-            Q(title__icontains=query)
-            | Q(similarity__gte=_AUTOCOMPLETE_WORD_SIMILARITY_THRESHOLD)
-        )
-        .select_related("wikidata_item")
-        .order_by("match_rank", "-similarity", "lower_title")[:10]
-    )
-
     results = []
-    for subject in subjects:
+    for subject in _matching_subjects(query):
         result = {
             "id": subject.id,
             "title": subject.title,
@@ -173,25 +159,12 @@ def subject_autocomplete(request):
             "wikidata_id": subject.wikidata_item.wikidata_id
             if subject.wikidata_item
             else None,
+            "matched_alias": subject.matched_alias,
         }
         results.append(result)
 
     return JsonResponse(results, safe=False)
 
-
-# Cypher for the subjects half of the browse-page autocomplete:
-# case-insensitive substring match against the mirrored English/``mul`` label of
-# every :ProjectSubject-marked entity. Marker-only stubs without a
-# mirrored label are excluded, matching the old query's mandatory
-# rdfs:label join.
-_BROWSE_AUTOCOMPLETE_SUBJECTS_QUERY = """\
-MATCH (s:ProjectSubject)
-WHERE s.label_en IS NOT NULL
-  AND toLower(s.label_en) CONTAINS toLower($q)
-RETURN s.id AS qid, s.label_en AS label
-ORDER BY label
-LIMIT 10
-"""
 
 # Top-of-hierarchy Wikidata classes that appear in nearly every entity's
 # P31/P279* closure but are too abstract to be useful filters. They get
@@ -218,16 +191,16 @@ _AUTOCOMPLETE_CATEGORY_DENYLIST = (
 def browse_autocomplete(request):
     """JSON autocomplete for the subject browse page.
 
-    Returns both ``subjects`` (Wikidata-entity Subjects whose label matches)
-    and ``categories`` (ancestors of any Subject whose label matches,
-    ranked by subject-count). Subjects are returned with their Django slug
-    so the frontend can navigate directly; categories with their Q-ID so
-    the frontend can apply a ``?category=`` filter.
+    Returns both ``subjects`` (Subjects whose title or Wikidata alias
+    matches) and ``categories`` (ancestors of any Subject whose label or
+    alias matches, ranked by match quality and then subject-count).
+    Subjects are returned with their Django slug so the frontend can
+    navigate directly; categories with their Q-ID so the frontend can apply
+    a ``?category=`` filter.
 
-    Subjects come from the Memgraph mirror; categories come from the
-    ``SubjectAncestor`` materialization in Postgres (indexed substring
-    match against the mirrored English/``mul`` label in ``WikidataItem.title``,
-    no graph traversal per request).
+    Both halves rank matches the same way as ``subject_autocomplete`` (see
+    ``subjects.name_search``); categories come from the ``SubjectAncestor``
+    materialization, so neither half touches the graph.
     """
     q = (request.GET.get("q") or "").strip()
     if len(q) < 2:
@@ -237,51 +210,46 @@ def browse_autocomplete(request):
             f"invalid q: exceeds {_MAX_AUTOCOMPLETE_QUERY_LEN} characters"
         )
 
-    try:
-        with MemgraphClient() as client:
-            subject_rows = client.read(_BROWSE_AUTOCOMPLETE_SUBJECTS_QUERY, q=q)
-    except GRAPH_ERRORS as e:
-        logger.warning("Memgraph autocomplete subjects query failed: %s", e)
-        subject_rows = []
+    subjects_data = [
+        {
+            "slug": s.slug,
+            "title": s.title,
+            "wikidata_id": s.wikidata_item.wikidata_id if s.wikidata_item else None,
+            "matched_alias": s.matched_alias,
+        }
+        for s in _matching_subjects(q)
+    ]
 
-    matched_qids = [row["qid"] for row in subject_rows]
-    subjects_by_qid = {
-        s.wikidata_item.wikidata_id: s
-        for s in Subject.objects.select_related("wikidata_item").filter(
-            wikidata_item__wikidata_id__in=matched_qids
+    # Ancestors that are themselves project Subjects belong in the subjects
+    # half of the dropdown, not the categories half.
+    subject_count = (
+        SubjectAncestor.objects.filter(ancestor=OuterRef("pk"))
+        .order_by()
+        .values("ancestor")
+        .annotate(n=Count("pk"))
+        .values("n")
+    )
+    categories = (
+        annotate_name_match(
+            WikidataItem.objects.filter(
+                Exists(SubjectAncestor.objects.filter(ancestor=OuterRef("pk"))),
+                subject__isnull=True,
+            ).exclude(wikidata_id__in=_AUTOCOMPLETE_CATEGORY_DENYLIST),
+            q,
+            title_field="title",
+            item_field="pk",
         )
-    }
-    subjects_data = []
-    for qid in matched_qids:
-        s = subjects_by_qid.get(qid)
-        if s is None:
-            continue
-        subjects_data.append(
-            {
-                "slug": s.slug,
-                "title": s.title,
-                "wikidata_id": qid,
-            }
-        )
-
-    # ``ancestor__subject__isnull=True`` excludes ancestors that are
-    # themselves project Subjects — they belong in the subjects half of
-    # the dropdown, not the categories half. Equivalent to the old
-    # ``FILTER NOT EXISTS { GRAPH <project_graph> { ?ancestor a Subject } }``.
+        .annotate(subject_count=Subquery(subject_count, output_field=IntegerField()))
+        .order_by("match_rank", "-subject_count", "title")[:10]
+    )
     categories_data = [
         {
-            "qid": row["ancestor__wikidata_id"],
-            "label": row["ancestor__title"],
-            "subject_count": row["n"],
+            "qid": item.wikidata_id,
+            "label": item.title,
+            "subject_count": item.subject_count,
+            "matched_alias": item.matched_alias,
         }
-        for row in (
-            SubjectAncestor.objects.filter(ancestor__title__icontains=q)
-            .exclude(ancestor__wikidata_id__in=_AUTOCOMPLETE_CATEGORY_DENYLIST)
-            .filter(ancestor__subject__isnull=True)
-            .values("ancestor__wikidata_id", "ancestor__title")
-            .annotate(n=Count("subject", distinct=True))
-            .order_by("-n", "ancestor__title")[:10]
-        )
+        for item in categories
     ]
 
     return JsonResponse({"categories": categories_data, "subjects": subjects_data})

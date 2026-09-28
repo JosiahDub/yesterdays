@@ -125,9 +125,13 @@ function initSubjectAutocomplete() {
         let description = data.value.description
           ? data.value.description.substring(0, 40) + "..."
           : "";
+        // Set when the query hit a Wikidata alias rather than the title.
+        const alias = data.value.matched_alias
+          ? ` <small class="text-muted">aka ${escapeHtml(data.value.matched_alias)}</small>`
+          : "";
         item.innerHTML = `
                     <span style="text-overflow: ellipsis; white-space: nowrap; overflow: hidden;">
-                        ${data.match} <small class="text-muted ms-2">${description}</small>
+                        ${data.match}${alias} <small class="text-muted ms-2">${description}</small>
                     </span>
                     <span style="display: flex; align-items: center; font-size: 13px; font-weight: 100; text-transform: uppercase; color: rgba(0,0,0,.5);">
                         ${data.value.wikidata_id || ""}

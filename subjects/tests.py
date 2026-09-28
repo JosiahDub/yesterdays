@@ -44,6 +44,7 @@ from .models import (
     OsmElement,
     Subject,
     SubjectAncestor,
+    WikidataAlias,
     WikidataItem,
     _preferred_wikidata_label,
 )
@@ -57,11 +58,13 @@ from .tasks import (
     sync_osm_elements,
 )
 from .views import _MAX_AUTOCOMPLETE_QUERY_LEN
+from .wikidata_aliases import aliases_from_payload, sync_wikidata_aliases
 from .wikidata_closure import (
     ClosureLoadError,
     apply_closure,
     build_graph_payload,
     closure_query,
+    commit_closure_to_memgraph,
     extract_seed_metadata,
     parse_closure,
 )
@@ -1354,6 +1357,110 @@ class ApplyClosureTests(SimpleTestCase):
         self.assertLess(last_wipe, first_write)
 
 
+class AliasesFromPayloadTests(SimpleTestCase):
+    """Reading each entity's alias set out of the graph payload."""
+
+    def test_aliases_keyed_by_language(self):
+        groups, _ = parse_closure(BuildGraphPayloadTests.TTL.encode())
+        aliases = aliases_from_payload(build_graph_payload(groups)["entities"])
+        self.assertEqual(aliases["Q100"], {("en", "The Hall"), ("en", "Old Hall")})
+
+    def test_entities_without_aliases_get_an_empty_set(self):
+        groups, _ = parse_closure(BuildGraphPayloadTests.TTL.encode())
+        aliases = aliases_from_payload(build_graph_payload(groups)["entities"])
+        self.assertEqual(aliases["Q200"], set())
+
+
+class SyncWikidataAliasesTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        # bulk_create bypasses WikidataItem.save()'s live Wikidata fetch.
+        cls.hall, cls.building = WikidataItem.objects.bulk_create(
+            [
+                WikidataItem(wikidata_id="Q100", title="Test Hall"),
+                WikidataItem(wikidata_id="Q200", title="building"),
+            ]
+        )
+
+    def _aliases(self, item):
+        return set(item.aliases.values_list("language", "alias"))
+
+    def test_creates_then_is_idempotent(self):
+        wanted = {"Q100": {("en", "The Hall"), ("mul", "Hall")}}
+        self.assertEqual(sync_wikidata_aliases(wanted), (2, 0))
+        self.assertEqual(
+            self._aliases(self.hall), {("en", "The Hall"), ("mul", "Hall")}
+        )
+        self.assertEqual(sync_wikidata_aliases(wanted), (0, 0))
+
+    def test_removed_aliases_are_deleted(self):
+        sync_wikidata_aliases({"Q100": {("en", "The Hall"), ("en", "Old Hall")}})
+        self.assertEqual(sync_wikidata_aliases({"Q100": {("en", "The Hall")}}), (0, 1))
+        self.assertEqual(self._aliases(self.hall), {("en", "The Hall")})
+
+    def test_empty_set_clears_only_that_item(self):
+        sync_wikidata_aliases(
+            {"Q100": {("en", "The Hall")}, "Q200": {("en", "edifice")}}
+        )
+        sync_wikidata_aliases({"Q100": set()})
+        self.assertEqual(self._aliases(self.hall), set())
+        self.assertEqual(self._aliases(self.building), {("en", "edifice")})
+
+    def test_unknown_qids_are_skipped(self):
+        self.assertEqual(sync_wikidata_aliases({"Q999": {("en", "Nowhere")}}), (0, 0))
+        self.assertFalse(WikidataAlias.objects.exists())
+
+
+@patch("subjects.memgraph.ensure_schema")
+class CommitClosureAliasesTests(TestCase):
+    """commit_closure_to_memgraph mirrors aliases into Postgres."""
+
+    def _commit(self, ttl):
+        groups, labels = parse_closure(ttl.encode())
+        commit_closure_to_memgraph("Q100", groups, labels, client=Mock())
+
+    def setUp(self):
+        # The seed row always exists before a commit (see the callers).
+        WikidataItem.objects.bulk_create(
+            [WikidataItem(wikidata_id="Q100", title="Test Hall")]
+        )
+
+    def test_seed_and_ancestor_aliases_are_written(self, _ensure_schema):
+        ttl = BuildGraphPayloadTests.TTL.replace(
+            'wd:Q200 rdfs:label "building"@en ;',
+            'wd:Q200 rdfs:label "building"@en ;\n    skos:altLabel "edifice"@en ;',
+        )
+        self._commit(ttl)
+        self.assertEqual(
+            set(
+                WikidataAlias.objects.filter(item__wikidata_id="Q100").values_list(
+                    "alias", flat=True
+                )
+            ),
+            {"The Hall", "Old Hall"},
+        )
+        self.assertEqual(
+            list(
+                WikidataAlias.objects.filter(item__wikidata_id="Q200").values_list(
+                    "alias", flat=True
+                )
+            ),
+            ["edifice"],
+        )
+
+    def test_recommit_deletes_aliases_removed_upstream(self, _ensure_schema):
+        self._commit(BuildGraphPayloadTests.TTL)
+        self._commit(BuildGraphPayloadTests.TTL.replace(', "Old Hall"@en', ""))
+        self.assertEqual(
+            list(
+                WikidataAlias.objects.filter(item__wikidata_id="Q100").values_list(
+                    "alias", flat=True
+                )
+            ),
+            ["The Hall"],
+        )
+
+
 class BrowseSubjectsTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -1598,6 +1705,21 @@ class SubjectAutocompleteTests(TestCase):
         )
         for item in items:
             Subject.objects.create(title=item.title, wikidata_item=item)
+        by_qid = {item.wikidata_id: item for item in items}
+        WikidataAlias.objects.bulk_create(
+            [
+                WikidataAlias(item=by_qid["Q104"], language="en", alias="The Bottom"),
+                WikidataAlias(
+                    item=by_qid["Q101"],
+                    language="en",
+                    alias="Church Hill Historic District",
+                ),
+                WikidataAlias(
+                    item=by_qid["Q105"], language="en", alias="Church Hill North"
+                ),
+                WikidataAlias(item=by_qid["Q103"], language="en", alias="Richmond, CA"),
+            ]
+        )
         cls.url = reverse("subject_autocomplete")
 
     def _titles(self, q):
@@ -1634,10 +1756,41 @@ class SubjectAutocompleteTests(TestCase):
     def test_overlong_query_returns_empty(self):
         self.assertEqual(self._titles("x" * (_MAX_AUTOCOMPLETE_QUERY_LEN + 1)), [])
 
+    def test_alias_match_reports_the_alias(self):
+        rows = self.client.get(self.url, {"q": "the bottom"}).json()
+        by_title = {row["title"]: row for row in rows}
+        self.assertEqual(by_title["Shockoe Bottom"]["matched_alias"], "The Bottom")
+
+    def test_alias_typo_match_found(self):
+        rows = self.client.get(self.url, {"q": "the botom"}).json()
+        by_title = {row["title"]: row for row in rows}
+        self.assertEqual(by_title["Shockoe Bottom"]["matched_alias"], "The Bottom")
+
+    def test_alias_fragment_is_not_a_fuzzy_match(self):
+        # word_similarity('capitol', 'Richmond, CA') clears the title
+        # threshold on the shared "ca" alone; aliases need a closer match.
+        self.assertNotIn("Monumental Church", self._titles("capitol"))
+
+    def test_title_match_reports_no_alias(self):
+        rows = self.client.get(self.url, {"q": "church hill"}).json()
+        by_title = {row["title"]: row for row in rows}
+        # The title is exact; its alias only a prefix match, so the title wins.
+        self.assertIsNone(by_title["Church Hill"]["matched_alias"])
+
+    def test_exact_title_beats_alias_prefix(self):
+        rows = self.client.get(self.url, {"q": "church hill"}).json()
+        titles = [row["title"] for row in rows]
+        self.assertLess(titles.index("Church Hill"), titles.index("Shokoe Hill"))
+        by_title = {row["title"]: row for row in rows}
+        self.assertEqual(by_title["Shokoe Hill"]["matched_alias"], "Church Hill North")
+
     def test_response_shape(self):
         response = self.client.get(self.url, {"q": "church"})
         rows = response.json()
-        self.assertEqual(set(rows[0]), {"id", "title", "description", "wikidata_id"})
+        self.assertEqual(
+            set(rows[0]),
+            {"id", "title", "description", "wikidata_id", "matched_alias"},
+        )
         by_title = {row["title"]: row for row in rows}
         self.assertEqual(
             by_title["Church Hill"]["description"], "Neighborhood in Richmond"
@@ -1649,6 +1802,101 @@ class SubjectAutocompleteTests(TestCase):
         # database query despite get_description() touching the item.
         with self.assertNumQueries(1):
             self.client.get(self.url, {"q": "church"})
+
+
+class BrowseAutocompleteTests(TestCase):
+    """The browse-page autocomplete (subjects/views.py), Postgres-only."""
+
+    @classmethod
+    def setUpTestData(cls):
+        # bulk_create bypasses WikidataItem.save()'s live Wikidata fetch.
+        hotel_item, cemetery_item, hotel, cemetery, entity = (
+            WikidataItem.objects.bulk_create(
+                [
+                    WikidataItem(wikidata_id="Q11", title="Jefferson Hotel"),
+                    WikidataItem(wikidata_id="Q12", title="Hollywood Cemetery"),
+                    WikidataItem(wikidata_id="Q21", title="hotel"),
+                    WikidataItem(wikidata_id="Q22", title="cemetery"),
+                    # Denylisted as too abstract to be a useful category.
+                    WikidataItem(wikidata_id="Q35120", title="entity"),
+                ]
+            )
+        )
+        jefferson = Subject.objects.create(
+            title="Jefferson Hotel", wikidata_item=hotel_item
+        )
+        hollywood = Subject.objects.create(
+            title="Hollywood Cemetery", wikidata_item=cemetery_item
+        )
+        WikidataAlias.objects.bulk_create(
+            [
+                WikidataAlias(item=hotel_item, language="en", alias="The Jefferson"),
+                WikidataAlias(item=cemetery, language="en", alias="graveyard"),
+                WikidataAlias(item=entity, language="en", alias="graveyard"),
+            ]
+        )
+        SubjectAncestor.objects.bulk_create(
+            [
+                SubjectAncestor(subject=jefferson, ancestor=hotel),
+                SubjectAncestor(subject=hollywood, ancestor=cemetery),
+                SubjectAncestor(subject=hollywood, ancestor=entity),
+                # An ancestor that is itself a Subject.
+                SubjectAncestor(subject=jefferson, ancestor=cemetery_item),
+            ]
+        )
+        cls.url = reverse("subjects:browse_autocomplete")
+
+    def _get(self, q):
+        response = self.client.get(self.url, {"q": q})
+        self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    def test_subject_matches_by_alias(self):
+        subjects = self._get("the jefferson")["subjects"]
+        self.assertEqual(
+            subjects,
+            [
+                {
+                    "slug": "jefferson-hotel",
+                    "title": "Jefferson Hotel",
+                    "wikidata_id": "Q11",
+                    "matched_alias": "The Jefferson",
+                }
+            ],
+        )
+
+    def test_subject_matches_despite_typo(self):
+        titles = [s["title"] for s in self._get("hollywod")["subjects"]]
+        self.assertIn("Hollywood Cemetery", titles)
+
+    @patch("subjects.memgraph.get_driver", side_effect=AssertionError("graph hit"))
+    def test_does_not_touch_memgraph(self, _get_driver):
+        self.assertTrue(self._get("hotel")["subjects"])
+
+    def test_category_matches_by_alias_and_skips_denylist(self):
+        self.assertEqual(
+            self._get("graveyard")["categories"],
+            [
+                {
+                    "qid": "Q22",
+                    "label": "cemetery",
+                    "subject_count": 1,
+                    "matched_alias": "graveyard",
+                }
+            ],
+        )
+
+    def test_ancestor_that_is_a_subject_is_not_a_category(self):
+        data = self._get("hollywood")
+        self.assertEqual(data["categories"], [])
+        self.assertIn("Hollywood Cemetery", [s["title"] for s in data["subjects"]])
+
+    def test_short_and_overlong_queries(self):
+        self.assertEqual(self._get("h"), {"categories": [], "subjects": []})
+        response = self.client.get(
+            self.url, {"q": "x" * (_MAX_AUTOCOMPLETE_QUERY_LEN + 1)}
+        )
+        self.assertEqual(response.status_code, 400)
 
 
 class ManualWikidataRefreshQueueTests(TestCase):

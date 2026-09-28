@@ -14,11 +14,14 @@ export interface SubjectBrowserConfig {
 
 interface CategorySuggestion extends SubjectCategory {
   subject_count: number;
+  matched_alias: string | null;
 }
 
 interface SubjectSuggestion {
   slug: string;
   title: string;
+  wikidata_id: string | null;
+  matched_alias: string | null;
 }
 
 interface Suggestions {
@@ -64,8 +67,8 @@ function isAbortError(error: unknown): boolean {
 
 /**
  * Alpine.js component for subject browsing with search, "Load More", and a
- * two-section autocomplete (Subjects + Categories powered by the Memgraph
- * Wikidata mirror).
+ * two-section autocomplete (Subjects + Categories, matched on titles and
+ * Wikidata aliases).
  */
 window.Alpine.data("subjectBrowser", function (): SubjectBrowser {
   const config = window.subjectBrowserConfig || {};

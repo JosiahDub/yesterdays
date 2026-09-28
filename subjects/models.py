@@ -355,6 +355,45 @@ class WikidataItem(models.Model):
         ]
 
 
+class WikidataAlias(models.Model):
+    """One Wikidata alias (``skos:altLabel``) of a ``WikidataItem``.
+
+    Mirrored out of each closure load alongside ``WikidataItem.title`` (see
+    ``subjects.wikidata_aliases``) so the autocompletes can match alternative
+    names without a graph round trip.
+    """
+
+    item = models.ForeignKey(
+        WikidataItem, on_delete=models.CASCADE, related_name="aliases"
+    )
+    language = models.CharField(
+        max_length=35,
+        help_text="Language key as mirrored in Memgraph (e.g. en, mul, en_gb)",
+    )
+    alias = models.CharField(max_length=500)
+
+    def __str__(self):
+        return f"{self.alias} ({self.language})"
+
+    class Meta:
+        ordering = ["language", "alias"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["item", "language", "alias"],
+                name="wikidataalias_unique",
+            ),
+        ]
+        indexes = [
+            # Backs the ``alias__icontains`` arm of the autocomplete match,
+            # like ``subject_title_trgm`` does for titles.
+            GinIndex(
+                fields=["alias"],
+                name="wikidataalias_alias_trgm",
+                opclasses=["gin_trgm_ops"],
+            ),
+        ]
+
+
 class OsmElement(models.Model):
     """OpenStreetMap element with cached geometry"""
 
