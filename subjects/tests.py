@@ -1682,6 +1682,42 @@ class BrowseSubjectsRegionTests(TestCase):
             "No subjects have images in Empty Region. Showing all subjects.",
         )
 
+    @patch("subjects.views.fetch_authority_ids", return_value=[])
+    @patch("subjects.views.fetch_subject_facts", return_value={})
+    def test_subject_detail_grid_is_scoped_to_selected_region(self, *_mocks):
+        response = self.client.get(
+            reverse("subjects:subject_detail", args=[self.alpha.slug])
+        )
+
+        self.assertEqual(
+            {image.title for image in response.context["page_obj"]},
+            {"Alpha in Richmond", "More Alpha in Richmond"},
+        )
+        self.assertEqual(response.context["total_images"], 2)
+        self.assertEqual(response.context["total_subject_images"], 3)
+        self.assertEqual(response.context["browse_region"], self.virginia)
+        self.assertFalse(response.context["region_fallback"])
+        self.assertIn("region=Q2001", response.context["georeference_url"])
+        self.assertContains(response, "Showing 2 of 3 images in Virginia.")
+
+    @patch("subjects.views.fetch_authority_ids", return_value=[])
+    @patch("subjects.views.fetch_subject_facts", return_value={})
+    def test_subject_detail_falls_back_to_all_images_outside_region(self, *_mocks):
+        self.client.cookies[REGION_COOKIE_NAME] = "Q2004"
+        response = self.client.get(
+            reverse("subjects:subject_detail", args=[self.alpha.slug])
+        )
+
+        self.assertEqual(len(response.context["page_obj"]), 3)
+        self.assertIsNone(response.context["browse_region"])
+        self.assertTrue(response.context["region_fallback"])
+        self.assertNotIn("region=", response.context["georeference_url"])
+        self.assertContains(
+            response,
+            "No Alpha Subject images in your selected region. "
+            "Showing all images featuring Alpha Subject.",
+        )
+
 
 class SubjectAutocompleteTests(TestCase):
     """The fuzzy subject-tagging autocomplete (subjects/views.py)."""

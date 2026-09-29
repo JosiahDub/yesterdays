@@ -170,7 +170,7 @@
                                 </a>
                             {% endif %}
                             {% if pending_images > 0 %}
-                                <a href="{% url 'images:georeference_interface' %}?subject={{ subject.slug }}" class="btn btn-success">
+                                <a href="{{ georeference_url }}" class="btn btn-success">
                                     <i class="fas fa-map-marker-alt me-2"></i>Start Georeferencing
                                 </a>
                             {% endif %}
@@ -183,7 +183,7 @@
 
 
         <!-- Map Visualization -->
-        {% if georeferenced_images > 0 %}
+        {% if subject_georeferenced_images > 0 %}
             <div class="card mb-4">
                 <div class="card-header">
                     <h5 class="mb-0">
@@ -201,9 +201,17 @@
             <h2>{{ total_images }} image{{ total_images|pluralize }} featuring {{ subject.title }}</h2>
         </div>
 
-        {% with geo_url="/georeference/?subject="|add:subject.slug %}
-            {% include 'images/partials/image_grid.html' with georeference_url=geo_url show_collection_link=True badges=True buttons=True empty_message="No images have been tagged with this subject yet." staff_message="Staff members can add this subject to images from the image detail page." show_toolbar=True %}
-        {% endwith %}
+        {% if region_fallback %}
+            <div class="alert alert-info" role="status">
+                No {{ subject.title }} images in your selected region. Showing all images featuring {{ subject.title }}.
+            </div>
+        {% elif browse_region and total_images < total_subject_images %}
+            <div class="alert alert-secondary" role="status">
+                Showing {{ total_images }} of {{ total_subject_images }} image{{ total_subject_images|pluralize }} in {{ browse_region }}.
+            </div>
+        {% endif %}
+
+        {% include 'images/partials/image_grid.html' with georeference_url=georeference_url show_collection_link=True badges=True buttons=True empty_message="No images have been tagged with this subject yet." staff_message="Staff members can add this subject to images from the image detail page." show_toolbar=True %}
     </div>
 </div>
 {% endblock %}

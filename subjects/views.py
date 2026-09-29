@@ -1,4 +1,5 @@
 import logging
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib import messages
@@ -20,6 +21,7 @@ from django.db.models.functions import Lower
 from django.http import Http404, HttpResponseBadRequest, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.text import slugify
 from django.views.decorators.cache import cache_control
@@ -877,16 +879,29 @@ def subject_detail(request, subject_slug):
     )
     no_subjects = request.GET.get("no_subjects") == "true"
 
-    # Get images associated with this subject or its descendants (only from
+    # Images associated with this subject or its descendants (only from
     # public collections, excluding duplicates)
+    all_images = Image.objects.filter(
+        subject_mappings__subject_id__in=relevant_subject_ids,
+        duplicate_of__isnull=True,
+        collection__public=True,
+        collection__source__public=True,
+    ).distinct()
+
+    # Scope the grid and its counts to the navbar region, falling back to all
+    # of the subject's images when none of them are in it. The map stays global.
+    region = get_current_region(request)
+    region_fallback = False
+    scoped_images = all_images
+    if region is not None:
+        scoped_images = all_images.in_region(region)
+        if not scoped_images.exists():
+            region_fallback = True
+            region = None
+            scoped_images = all_images
+
     images = (
-        Image.objects.filter(
-            subject_mappings__subject_id__in=relevant_subject_ids,
-            collection__public=True,
-            collection__source__public=True,
-            duplicate_of__isnull=True,
-        )
-        .select_related("collection__source")
+        scoped_images.select_related("collection__source")
         .prefetch_related("subjects")
         .annotate(
             has_georeference=Case(
@@ -963,20 +978,22 @@ def subject_detail(request, subject_slug):
             images = images.filter(filter_conditions)
 
     # Get counts before filtering for statistics
-    all_images = Image.objects.filter(
-        subject_mappings__subject_id__in=relevant_subject_ids,
-        duplicate_of__isnull=True,
-        collection__public=True,
-        collection__source__public=True,
-    ).distinct()
-    total_images = all_images.count()
-    georeferenced_images = (
+    total_subject_images = all_images.count()
+    subject_georeferenced_images = (
         all_images.filter(georeferences__isnull=False).distinct().count()
     )
+    if region is not None:
+        total_images = scoped_images.count()
+        georeferenced_images = (
+            scoped_images.filter(georeferences__isnull=False).distinct().count()
+        )
+    else:
+        total_images = total_subject_images
+        georeferenced_images = subject_georeferenced_images
     pending_images = (
         total_images
         - georeferenced_images
-        - all_images.filter(will_not_georef=True).count()
+        - scoped_images.filter(will_not_georef=True).count()
     )
 
     # Paginate the filtered images for browsing
@@ -1000,11 +1017,23 @@ def subject_detail(request, subject_slug):
         else []
     )
 
+    georeference_params = {"subject": subject.slug}
+    if region is not None:
+        georeference_params["region"] = region.wikidata_item.wikidata_id
+    georeference_url = (
+        reverse("images:georeference_interface") + "?" + urlencode(georeference_params)
+    )
+
     context = {
         "subject": subject,
+        "browse_region": region,
+        "region_fallback": region_fallback,
+        "georeference_url": georeference_url,
         "page_obj": page_obj,
         "total_images": total_images,
+        "total_subject_images": total_subject_images,
         "georeferenced_images": georeferenced_images,
+        "subject_georeferenced_images": subject_georeferenced_images,
         "pending_images": pending_images,
         "completion_percentage": (georeferenced_images / total_images * 100)
         if total_images > 0
