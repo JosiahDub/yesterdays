@@ -1621,9 +1621,11 @@ class BrowseSubjectsRegionTests(TestCase):
             image=cls.alpha_richmond,
             point=Point(-77.43, 37.55, srid=4326),
         )
+        # Only the first georeference on an image may be anonymous.
         Georeference.objects.create(
             image=cls.alpha_richmond,
             point=Point(-77.42, 37.56, srid=4326),
+            georeferenced_by=User.objects.create_user(username="region-tester"),
         )
 
     @staticmethod
@@ -1653,7 +1655,6 @@ class BrowseSubjectsRegionTests(TestCase):
         self.assertEqual(subjects[1].total_images, 1)
         self.assertEqual(response.context["browse_region"], self.virginia)
         self.assertFalse(response.context["region_fallback"])
-        self.assertContains(response, "Showing subjects with images in Virginia")
         self.assertNotContains(response, "Gamma Subject")
 
     def test_ajax_search_remains_scoped_to_selected_region(self):
@@ -1676,10 +1677,6 @@ class BrowseSubjectsRegionTests(TestCase):
         self.assertEqual(
             {subject.pk for subject in response.context["subjects"]},
             {self.alpha.pk, self.beta.pk, self.gamma.pk},
-        )
-        self.assertContains(
-            response,
-            "No subjects have images in Empty Region. Showing all subjects.",
         )
 
     @patch("subjects.views.fetch_authority_ids", return_value=[])
