@@ -36,6 +36,10 @@ def resolve_wikidata_id(value):
         raise CommandError(
             f'"{value}" is not a Q-ID and no Subject exists with that slug'
         )
+    except Subject.MultipleObjectsReturned:
+        raise CommandError(
+            f'More than one Subject has the slug "{value}"; pass the Q-ID instead'
+        )
     if not subject.wikidata_item:
         raise CommandError(f'Subject "{subject.slug}" has no linked WikidataItem')
     return subject.wikidata_item.wikidata_id
@@ -51,7 +55,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             "identifier",
-            help='Wikidata ID (e.g. "Q12345") or a Subject slug',
+            help='Wikidata ID (e.g. "Q12345") or an unambiguous Subject slug',
         )
         parser.add_argument(
             "--timeout",

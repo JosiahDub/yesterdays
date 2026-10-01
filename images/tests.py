@@ -1005,7 +1005,11 @@ class GeoreferenceRegionQueueTests(TestCase):
         self.assertOutsideQueue({"album": self.album.id})
 
     def test_explicit_subject_overrides_region_preference(self):
-        self.assertOutsideQueue({"subject": self.subject.slug})
+        self.assertOutsideQueue({"subject": "Q100000"})
+
+    def test_subject_queue_does_not_accept_slugs(self):
+        response = self.client.get(self.url, {"subject": self.subject.slug})
+        self.assertEqual(response.status_code, 404)
 
 
 class StatsEventsMixin:

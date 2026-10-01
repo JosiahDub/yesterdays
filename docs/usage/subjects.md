@@ -20,7 +20,7 @@ The [subjects page](https://yesterdays.today/subjects/) provides two ways to exp
 - A map showing buildings, parks, etc. using [OpenStreetMap](https://openstreetmap.org) data.
 - An autocomplete-enabled search bar where you can filter by category.
 
-As demonstrated by the links at the top of this page, categories are determined by Wikidata relationships such as [`P31 instance of`](https://www.wikidata.org/wiki/Property:P31) or [`P279 subclass of`](https://www.wikidata.org/wiki/Property:P279). This system of categories allows us to tag specific things like [Morgan Fountain](https://yesterdays.today/subjects/morgan-fountain/), and have those photos also show up on the page for [fountain](https://yesterdays.today/subjects/fountain/). This works because [`Q137179642 Morgan Fountain`](https://www.wikidata.org/wiki/Q137179642) is an instance of [`Q483453 fountain`](https://www.wikidata.org/wiki/Q483453).
+As demonstrated by the links at the top of this page, categories are determined by Wikidata relationships such as [`P31 instance of`](https://www.wikidata.org/wiki/Property:P31) or [`P279 subclass of`](https://www.wikidata.org/wiki/Property:P279). This system of categories allows us to tag specific things like [Morgan Fountain](https://yesterdays.today/subjects/Q137179642-morgan-fountain/), and have those photos also show up on the page for [fountain](https://yesterdays.today/subjects/Q483453-fountain/). This works because [`Q137179642 Morgan Fountain`](https://www.wikidata.org/wiki/Q137179642) is an instance of [`Q483453 fountain`](https://www.wikidata.org/wiki/Q483453).
 
 ## Tagging Subjects
 

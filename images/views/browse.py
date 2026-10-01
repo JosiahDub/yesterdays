@@ -458,7 +458,7 @@ def image_detail(request, image_id):
     image = get_object_or_404(
         Image.objects.select_related(
             "region", "collection__region", "collection__source__region", "license"
-        ),
+        ).prefetch_related("subject_mappings__subject__wikidata_item"),
         id=image_id,
     )
 

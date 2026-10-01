@@ -23,10 +23,10 @@ export interface SubjectInteractions {
 export function registerSubjectInteractions(
   map: MapLibreMap,
 ): SubjectInteractions {
-  // The slug the user committed to by clicking. While set, hovering other
+  // The subject key the user committed to by clicking. While set, hovering other
   // subjects must not steal the panel.
-  let pinnedSlug: string | null = null;
-  let hoveredSlug: string | null = null;
+  let pinnedKey: string | null = null;
+  let hoveredKey: string | null = null;
   let highlightedImageIds: number[] = [];
   let highlightTimeout: number | undefined;
 
@@ -48,10 +48,10 @@ export function registerSubjectInteractions(
     if (!feature) return null;
 
     const properties = feature.properties as Partial<SubjectFeatureProperties>;
-    if (!properties.subject_slug) return null;
+    if (!properties.subject_key) return null;
 
     return {
-      slug: properties.subject_slug,
+      key: properties.subject_key,
       title: properties.subject_name || "Unknown subject",
       imageIds: (properties.image_ids ?? "")
         .split(",")
@@ -84,8 +84,8 @@ export function registerSubjectInteractions(
   }
 
   function reset(): void {
-    pinnedSlug = null;
-    hoveredSlug = null;
+    pinnedKey = null;
+    hoveredKey = null;
     window.clearTimeout(highlightTimeout);
     applyHighlight([]);
   }
@@ -94,19 +94,19 @@ export function registerSubjectInteractions(
     const hit = subjectAt(e.point);
     map.getCanvas().style.cursor = hit ? "pointer" : "";
 
-    if (pinnedSlug) return;
+    if (pinnedKey) return;
 
     if (!hit) {
-      if (hoveredSlug === null) return;
-      hoveredSlug = null;
+      if (hoveredKey === null) return;
+      hoveredKey = null;
       window.clearTimeout(highlightTimeout);
       applyHighlight([]);
       dispatch(SUBJECT_MAP_EVENTS.clear);
       return;
     }
 
-    if (hit.slug === hoveredSlug) return;
-    hoveredSlug = hit.slug;
+    if (hit.key === hoveredKey) return;
+    hoveredKey = hit.key;
     dispatch(SUBJECT_MAP_EVENTS.preview, hit);
 
     window.clearTimeout(highlightTimeout);
@@ -122,14 +122,14 @@ export function registerSubjectInteractions(
     const hit = subjectAt(e.point);
 
     if (!hit) {
-      if (!pinnedSlug) return;
+      if (!pinnedKey) return;
       reset();
       dispatch(SUBJECT_MAP_EVENTS.clear);
       return;
     }
 
-    pinnedSlug = hit.slug;
-    hoveredSlug = hit.slug;
+    pinnedKey = hit.key;
+    hoveredKey = hit.key;
     window.clearTimeout(highlightTimeout);
     applyHighlight(hit.imageIds);
     dispatch(SUBJECT_MAP_EVENTS.pin, hit);

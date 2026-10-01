@@ -544,7 +544,8 @@ def osm_elements_vector_tiles_endpoint(request, z, x, y):
                 oe.osm_type as osm_type,
                 ST_GeometryType(oe.geometry) as geom_type,
                 s.title as subject_name,
-                s.slug as subject_slug,
+                -- Mirrors Subject.url_key: the Q-ID, then "-<slug>" if any.
+                w.wikidata_id || COALESCE('-' || NULLIF(s.slug, ''), '') as subject_key,
                 COALESCE(
                     string_agg(CAST(sm.image_id AS text), ','),
                     ''
@@ -552,9 +553,10 @@ def osm_elements_vector_tiles_endpoint(request, z, x, y):
                 oe.geometry_area as geometry_area
             FROM subjects_osmelement oe
             LEFT JOIN subjects_subject s ON s.id = oe.subject_id
+            INNER JOIN subjects_wikidataitem w ON w.id = s.wikidata_item_id
             INNER JOIN images_subjectmapping sm ON s.id = sm.subject_id
             WHERE ST_Intersects(oe.geometry, ST_Transform(ST_TileEnvelope(%s, %s, %s), 4326))
-            GROUP BY oe.id, s.id, oe.osm_id, oe.osm_type, oe.geometry, s.title, s.slug, oe.geometry_area
+            GROUP BY oe.id, s.id, oe.osm_id, oe.osm_type, oe.geometry, s.title, s.slug, w.wikidata_id, oe.geometry_area
             ORDER BY
                 CASE
                     WHEN ST_GeometryType(oe.geometry) IN ('ST_Polygon', 'ST_MultiPolygon') THEN oe.geometry_area

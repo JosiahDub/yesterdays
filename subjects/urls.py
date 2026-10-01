@@ -1,6 +1,9 @@
-from django.urls import path
+from django.urls import path, register_converter
 
 from . import views
+from .converters import SubjectKeyConverter
+
+register_converter(SubjectKeyConverter, "subject")
 
 app_name = "subjects"
 
@@ -8,11 +11,26 @@ urlpatterns = [
     # Subject browsing
     path("", views.browse_subjects, name="browse_subjects"),
     path("map/", views.subjects_map, name="subjects_map"),
-    path("<slug:subject_slug>/", views.subject_detail, name="subject_detail"),
+    path("<subject:qid>/", views.subject_detail, name="subject_detail"),
     path(
-        "<slug:subject_slug>/similar/",
+        "<subject:qid>/similar/",
         views.find_similar_images_to_subject,
         name="subject_similar_images",
+    ),
+    # Pre-Q-ID URLs (/subjects/<slug>/). These must stay below the routes
+    # above: slugs were always lowercase, so they never match the converter's
+    # uppercase "Q", and a malformed key that falls through to here 404s.
+    path(
+        "<slug:legacy_slug>/",
+        views.legacy_subject_redirect,
+        {"view_name": "subjects:subject_detail"},
+        name="legacy_subject_detail",
+    ),
+    path(
+        "<slug:legacy_slug>/similar/",
+        views.legacy_subject_redirect,
+        {"view_name": "subjects:subject_similar_images"},
+        name="legacy_subject_similar_images",
     ),
     # API endpoints
     path(
@@ -32,7 +50,7 @@ urlpatterns = [
     ),
     path("api/all/", views.all_subjects_api, name="all_subjects_api"),
     path(
-        "api/map-info/<slug:subject_slug>/",
+        "api/map-info/<subject:qid>/",
         views.subject_map_info,
         name="subject_map_info",
     ),

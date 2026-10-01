@@ -534,7 +534,9 @@ class Subject(models.Model):
     """Subject that can appear in images (buildings, people, monuments, etc.)"""
 
     title = models.CharField(max_length=500, help_text="Name/title of the subject")
-    slug = models.SlugField(unique=True)
+    # Cosmetic: URLs are keyed by the Q-ID (see ``url_key``), so slugs may
+    # repeat and may be empty.
+    slug = models.SlugField()
     wikidata_item = models.OneToOneField(
         WikidataItem,
         on_delete=models.CASCADE,
@@ -567,8 +569,14 @@ class Subject(models.Model):
     def __str__(self):
         return self.title
 
+    @property
+    def url_key(self):
+        """The subject's URL path segment: its Q-ID, then the slug if any."""
+        qid = self.wikidata_item.wikidata_id
+        return f"{qid}-{self.slug}" if self.slug else qid
+
     def get_absolute_url(self):
-        return reverse("subjects:subject_detail", kwargs={"subject_slug": self.slug})
+        return reverse("subjects:subject_detail", kwargs={"qid": self})
 
     def get_description(self):
         """Return a description for display, sourced from the Wikidata item.

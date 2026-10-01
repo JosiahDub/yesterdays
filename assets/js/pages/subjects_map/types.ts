@@ -6,7 +6,8 @@ export interface SubjectFeatureProperties {
   osm_type: string | null;
   geom_type: string;
   subject_name: string;
-  subject_slug: string;
+  // The subject's URL key (Subject.url_key): "Q123-some-slug", or just "Q123".
+  subject_key: string;
   // Comma-joined SubjectMapping image ids. Counts every mapping, including
   // non-public and duplicate images, so it drives the map highlight only —
   // never a user-facing count.
@@ -17,14 +18,14 @@ export interface SubjectFeatureProperties {
 // What the map hands the panel when a subject is hovered or pinned. Contains
 // only what the vector tile knows; everything else is fetched.
 export interface SubjectHit {
-  slug: string;
+  key: string;
   title: string;
   imageIds: number[];
 }
 
 // Response body of the subjects:subject_map_info endpoint.
 export interface SubjectMapInfo {
-  slug: string;
+  key: string;
   title: string;
   url: string;
   description: string;
@@ -59,5 +60,6 @@ export const SUBJECT_MAP_EVENTS = {
   closed: "subjects-map:closed",
 } as const;
 
-// Stand-in slug in the URL templates rendered into data attributes.
-export const SLUG_PLACEHOLDER = "__slug__";
+// Stand-in subject key in the URL templates rendered into data attributes.
+// It has to be a well-formed key for Django to reverse the URLs at all.
+export const KEY_PLACEHOLDER = "Q0";

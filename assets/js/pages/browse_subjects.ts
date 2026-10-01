@@ -18,7 +18,7 @@ interface CategorySuggestion extends SubjectCategory {
 }
 
 interface SubjectSuggestion {
-  slug: string;
+  url: string;
   title: string;
   wikidata_id: string | null;
   matched_alias: string | null;

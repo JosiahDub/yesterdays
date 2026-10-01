@@ -35,6 +35,7 @@ from images.models import (
     Source,
 )
 from subjects.models import OsmElement, Subject, WikidataItem
+from subjects.sparql_safety import looks_like_qid
 
 # ---------------------------------------------------------------------------
 # Users
@@ -533,6 +534,31 @@ class CollectionCreateSerializer(serializers.ModelSerializer):
         }
 
 
+class SubjectRelatedField(serializers.SlugRelatedField):
+    """Resolve a subject from its Wikidata Q-ID or, failing that, its slug.
+
+    Slugs are not unique, so one that matches several subjects is rejected
+    rather than guessed at.
+    """
+
+    default_error_messages = {
+        "ambiguous": (
+            "More than one subject has the slug {value}; use its Wikidata Q-ID instead."
+        ),
+    }
+
+    def to_internal_value(self, data):
+        if looks_like_qid(data):
+            try:
+                return self.get_queryset().get(wikidata_item__wikidata_id=data)
+            except Subject.DoesNotExist:
+                self.fail("does_not_exist", slug_name="wikidata_id", value=data)
+        try:
+            return super().to_internal_value(data)
+        except Subject.MultipleObjectsReturned:
+            self.fail("ambiguous", value=data)
+
+
 class ImportCommitSerializer(serializers.Serializer):
     slot_id = serializers.UUIDField()
     title = serializers.CharField(max_length=500)
@@ -555,7 +581,7 @@ class ImportCommitSerializer(serializers.Serializer):
     mirror = serializers.ChoiceField(
         choices=["none", "h", "v"], required=False, default="none"
     )
-    subjects = serializers.SlugRelatedField(
+    subjects = SubjectRelatedField(
         many=True,
         slug_field="slug",
         queryset=Subject.objects.all(),

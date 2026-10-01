@@ -18,7 +18,12 @@ from django.db.models import (
     When,
 )
 from django.db.models.functions import Lower
-from django.http import Http404, HttpResponseBadRequest, JsonResponse
+from django.http import (
+    Http404,
+    HttpResponseBadRequest,
+    HttpResponsePermanentRedirect,
+    JsonResponse,
+)
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
@@ -196,7 +201,7 @@ def browse_autocomplete(request):
     Returns both ``subjects`` (Subjects whose title or Wikidata alias
     matches) and ``categories`` (ancestors of any Subject whose label or
     alias matches, ranked by match quality and then subject-count).
-    Subjects are returned with their Django slug so the frontend can
+    Subjects are returned with their detail-page URL so the frontend can
     navigate directly; categories with their Q-ID so the frontend can apply
     a ``?category=`` filter.
 
@@ -214,7 +219,7 @@ def browse_autocomplete(request):
 
     subjects_data = [
         {
-            "slug": s.slug,
+            "url": s.get_absolute_url(),
             "title": s.title,
             "wikidata_id": s.wikidata_item.wikidata_id if s.wikidata_item else None,
             "matched_alias": s.matched_alias,
@@ -336,7 +341,11 @@ def _resolve_subject(wikidata_id):
     except ValidationError as exc:
         raise InvalidInput("; ".join(exc.messages))
 
-    subject, subject_created = Subject.objects.get_or_create(
+    # select_related so the subject's URL (keyed by Q-ID) costs no extra query
+    # when the caller renders a card for it.
+    subject, subject_created = Subject.objects.select_related(
+        "wikidata_item"
+    ).get_or_create(
         wikidata_item=wikidata_item,
         defaults={"title": wikidata_item.title},
     )
@@ -809,10 +818,10 @@ def subjects_map(request):
 
 
 @cache_control(public=True, max_age=settings.SUBJECT_MAP_INFO_CACHE_SECONDS)
-def subject_map_info(request, subject_slug):
+def subject_map_info(request, qid):
     """Compact subject summary for the subjects-map hover/pin panel.
 
-    Vector tiles only carry a subject's title and slug, so the panel fetches
+    Vector tiles only carry a subject's title and URL key, so the panel fetches
     the rest here. Kept deliberately cheap — no graph round-trips — because
     it is requested on hover.
     """
@@ -820,7 +829,7 @@ def subject_map_info(request, subject_slug):
         Subject.objects.select_related(
             "wikidata_item", "representative_image"
         ).annotate(**_public_image_count_annotations()),
-        slug=subject_slug,
+        wikidata_item__wikidata_id=qid,
     )
 
     representative_image = subject.get_representative_image()
@@ -828,7 +837,7 @@ def subject_map_info(request, subject_slug):
 
     return JsonResponse(
         {
-            "slug": subject.slug,
+            "key": subject.url_key,
             "title": subject.title,
             "url": subject.get_absolute_url(),
             "description": subject.get_description(),
@@ -844,9 +853,35 @@ def subject_map_info(request, subject_slug):
     )
 
 
-def subject_detail(request, subject_slug):
+def legacy_subject_redirect(request, legacy_slug, view_name):
+    """Permanently redirect a pre-Q-ID ``/subjects/<slug>/`` URL.
+
+    Slugs are no longer unique. Any link of this shape was minted before
+    duplicates were possible, so the oldest subject with the slug is the one
+    it meant.
+    """
+    subject = (
+        Subject.objects.select_related("wikidata_item")
+        .filter(slug=legacy_slug)
+        .order_by("pk")
+        .first()
+    )
+    if subject is None:
+        raise Http404("No Subject matches the given query.")
+
+    url = reverse(view_name, kwargs={"qid": subject})
+    query_string = request.META.get("QUERY_STRING")
+    if query_string:
+        url = f"{url}?{query_string}"
+    return HttpResponsePermanentRedirect(url)
+
+
+def subject_detail(request, qid):
     """Detail view for a specific subject showing its images"""
-    subject = get_object_or_404(Subject, slug=subject_slug)
+    subject = get_object_or_404(
+        Subject.objects.select_related("wikidata_item"),
+        wikidata_item__wikidata_id=qid,
+    )
 
     # Treat descendant subjects (those whose ancestors include this subject's
     # WikidataItem) as more-specific instances of this subject — their images
@@ -1017,7 +1052,7 @@ def subject_detail(request, subject_slug):
         else []
     )
 
-    georeference_params = {"subject": subject.slug}
+    georeference_params = {"subject": subject.wikidata_item.wikidata_id}
     if region is not None:
         georeference_params["region"] = region.wikidata_item.wikidata_id
     georeference_url = (
@@ -1048,7 +1083,7 @@ def subject_detail(request, subject_slug):
 
 @ratelimit(key="ip", rate="1000/h", method=["GET", "POST"])  # 16/min average
 @ratelimit(key="ip", rate="100/5m", method=["GET", "POST"])  # 20/min burst
-def find_similar_images_to_subject(request, subject_slug):
+def find_similar_images_to_subject(request, qid):
     """
     Find and display images with embeddings most similar to the centroid
     of all images associated with a subject.
@@ -1064,7 +1099,10 @@ def find_similar_images_to_subject(request, subject_slug):
     cards HTML partial for "Load More" functionality.
     """
     # Get the target subject
-    subject = get_object_or_404(Subject, slug=subject_slug)
+    subject = get_object_or_404(
+        Subject.objects.select_related("wikidata_item"),
+        wikidata_item__wikidata_id=qid,
+    )
 
     # Get all images for this subject that have embeddings
     subject_images = Image.objects.filter(
@@ -1080,7 +1118,7 @@ def find_similar_images_to_subject(request, subject_slug):
             request,
             "This subject has no images with embeddings, so similar images cannot be found.",
         )
-        return redirect("subjects:subject_detail", subject_slug=subject_slug)
+        return redirect(subject)
 
     # Check if this is an AJAX request for "Load More"
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
@@ -1127,7 +1165,7 @@ def find_similar_images_to_subject(request, subject_slug):
                 request,
                 "Unable to build a similarity query - no valid embeddings found.",
             )
-            return redirect("subjects:subject_detail", subject_slug=subject_slug)
+            return redirect(subject)
 
         # Get IDs of subject images to exclude from results
         subject_image_ids = list(subject_images.values_list("id", flat=True))
@@ -1306,4 +1344,4 @@ def find_similar_images_to_subject(request, subject_slug):
         messages.error(
             request, f"An error occurred while finding similar images: {str(e)}"
         )
-        return redirect("subjects:subject_detail", subject_slug=subject_slug)
+        return redirect(subject)

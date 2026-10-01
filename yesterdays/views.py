@@ -293,7 +293,7 @@ def get_subjects_feature(site_settings):
     # the overflow link, is a composition decision the image page knows
     # nothing about.
     mappings = site_settings.sort_home_subjects(
-        image.subject_mappings.select_related("subject").order_by(
+        image.subject_mappings.select_related("subject__wikidata_item").order_by(
             "order", "subject__title"
         )
     )

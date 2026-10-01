@@ -13,6 +13,7 @@ from osm_auth.models import UserPreferences
 from regions.context_processors import get_current_region
 from regions.models import Region
 from subjects.models import Subject
+from subjects.sparql_safety import looks_like_qid
 
 from ..models import (
     AerialGeoreference,
@@ -57,7 +58,7 @@ def georeference_interface(request):
     """Main georeferencing interface - can be filtered by source/collection/subject/album or show specific image"""
     source_slug = request.GET.get("source")
     collection_slug = request.GET.get("collection")
-    subject_slug = request.GET.get("subject")
+    subject_qid = request.GET.get("subject")
     difficulty = request.GET.get("difficulty")
     image_id = request.GET.get("image") or request.GET.get("current_image")
     album_id = request.GET.get("album")
@@ -120,7 +121,7 @@ def georeference_interface(request):
             source_slug,
             collection_slug,
             album_id,
-            subject_slug,
+            subject_qid,
         )
     )
     region_qid = request.GET.get("region")
@@ -171,8 +172,11 @@ def georeference_interface(request):
 
     # Filter by subject if specified
     subject = None
-    if subject_slug:
-        subject = get_object_or_404(Subject, slug=subject_slug)
+    if subject_qid:
+        # Subjects are addressed by Q-ID only; slugs are no longer unique.
+        if not looks_like_qid(subject_qid):
+            raise Http404("Subject not found")
+        subject = get_object_or_404(Subject, wikidata_item__wikidata_id=subject_qid)
         images = images.filter(subject_mappings__subject=subject)
 
     # Filter by difficulty if specified - can be multiple values (plus-separated)

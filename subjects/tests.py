@@ -23,7 +23,9 @@ from django.test import (
 )
 from django.urls import reverse
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError as DRFValidationError
 
+from api.serializers import ImportCommitSerializer
 from images.models import (
     Collection,
     CollectionEmbeddingStats,
@@ -1683,7 +1685,7 @@ class BrowseSubjectsRegionTests(TestCase):
     @patch("subjects.views.fetch_subject_facts", return_value={})
     def test_subject_detail_grid_is_scoped_to_selected_region(self, *_mocks):
         response = self.client.get(
-            reverse("subjects:subject_detail", args=[self.alpha.slug])
+            reverse("subjects:subject_detail", kwargs={"qid": self.alpha})
         )
 
         self.assertEqual(
@@ -1695,6 +1697,7 @@ class BrowseSubjectsRegionTests(TestCase):
         self.assertEqual(response.context["browse_region"], self.virginia)
         self.assertFalse(response.context["region_fallback"])
         self.assertIn("region=Q2001", response.context["georeference_url"])
+        self.assertIn("subject=Q2011", response.context["georeference_url"])
         self.assertContains(response, "Showing 2 of 3 images in Virginia.")
 
     @patch("subjects.views.fetch_authority_ids", return_value=[])
@@ -1702,13 +1705,14 @@ class BrowseSubjectsRegionTests(TestCase):
     def test_subject_detail_falls_back_to_all_images_outside_region(self, *_mocks):
         self.client.cookies[REGION_COOKIE_NAME] = "Q2004"
         response = self.client.get(
-            reverse("subjects:subject_detail", args=[self.alpha.slug])
+            reverse("subjects:subject_detail", kwargs={"qid": self.alpha})
         )
 
         self.assertEqual(len(response.context["page_obj"]), 3)
         self.assertIsNone(response.context["browse_region"])
         self.assertTrue(response.context["region_fallback"])
         self.assertNotIn("region=", response.context["georeference_url"])
+        self.assertIn("subject=Q2011", response.context["georeference_url"])
         self.assertContains(
             response,
             "No Alpha Subject images in your selected region. "
@@ -1890,7 +1894,7 @@ class BrowseAutocompleteTests(TestCase):
             subjects,
             [
                 {
-                    "slug": "jefferson-hotel",
+                    "url": "/subjects/Q11-jefferson-hotel/",
                     "title": "Jefferson Hotel",
                     "wikidata_id": "Q11",
                     "matched_alias": "The Jefferson",
@@ -2338,3 +2342,146 @@ class SubjectMutationAuthorizationTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 403)
+
+
+class SubjectUrlTests(TestCase):
+    """Subject URLs are keyed by Q-ID; the slug after it is decoration."""
+
+    @classmethod
+    def setUpTestData(cls):
+        # bulk_create bypasses WikidataItem.save()'s live Wikidata fetch.
+        house_item, twin_item, tokyo_item, store_item = (
+            WikidataItem.objects.bulk_create(
+                [
+                    WikidataItem(wikidata_id="Q3001", title="Old House"),
+                    WikidataItem(wikidata_id="Q3002", title="Old House"),
+                    WikidataItem(wikidata_id="Q3003", title="東京"),
+                    WikidataItem(wikidata_id="Q3004", title="Corner Store"),
+                ]
+            )
+        )
+        cls.house = Subject.objects.create(title="Old House", wikidata_item=house_item)
+        # Same label as the house, so the same slug.
+        cls.twin = Subject.objects.create(title="Old House", wikidata_item=twin_item)
+        # No Latin characters, so an empty slug.
+        cls.tokyo = Subject.objects.create(title="東京", wikidata_item=tokyo_item)
+        cls.store = Subject.objects.create(
+            title="Corner Store", wikidata_item=store_item
+        )
+
+    def setUp(self):
+        # The detail page asks Memgraph for these.
+        for target in ("fetch_subject_facts", "fetch_authority_ids"):
+            patcher = patch(f"subjects.views.{target}", return_value={})
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_subjects_may_share_a_slug(self):
+        self.assertEqual(self.house.slug, "old-house")
+        self.assertEqual(self.twin.slug, "old-house")
+
+    def test_absolute_url_is_qid_then_slug(self):
+        self.assertEqual(self.house.get_absolute_url(), "/subjects/Q3001-old-house/")
+        self.assertEqual(self.twin.get_absolute_url(), "/subjects/Q3002-old-house/")
+
+    def test_absolute_url_is_bare_qid_when_slug_is_empty(self):
+        self.assertEqual(self.tokyo.slug, "")
+        self.assertEqual(self.tokyo.get_absolute_url(), "/subjects/Q3003/")
+        response = self.client.get("/subjects/Q3003/")
+        self.assertEqual(response.context["subject"], self.tokyo)
+
+    def test_only_the_qid_identifies_the_subject(self):
+        for path in (
+            "/subjects/Q3001/",
+            "/subjects/Q3001-old-house/",
+            "/subjects/Q3001-wrong-slug/",
+            "/subjects/Q3001-/",
+        ):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.context["subject"], self.house)
+
+    def test_similar_images_route_ignores_the_slug(self):
+        # No embeddings here, so the view bounces back to the subject it found.
+        response = self.client.get("/subjects/Q3002-wrong/similar/")
+        self.assertRedirects(
+            response, "/subjects/Q3002-old-house/", fetch_redirect_response=False
+        )
+
+    def test_key_without_hyphen_before_the_slug_is_not_found(self):
+        self.assertEqual(self.client.get("/subjects/Q3001old-house/").status_code, 404)
+
+    def test_unknown_qid_is_not_found(self):
+        self.assertEqual(self.client.get("/subjects/Q999999/").status_code, 404)
+        self.assertEqual(
+            self.client.get("/subjects/Q999999-old-house/").status_code, 404
+        )
+
+    def test_legacy_slug_url_redirects_permanently_keeping_the_query(self):
+        response = self.client.get("/subjects/corner-store/?start_year=1900")
+        self.assertRedirects(
+            response,
+            "/subjects/Q3004-corner-store/?start_year=1900",
+            status_code=301,
+            fetch_redirect_response=False,
+        )
+
+        response = self.client.get("/subjects/corner-store/similar/?offset=24")
+        self.assertRedirects(
+            response,
+            "/subjects/Q3004-corner-store/similar/?offset=24",
+            status_code=301,
+            fetch_redirect_response=False,
+        )
+
+    def test_legacy_slug_shared_by_two_subjects_redirects_to_the_older(self):
+        response = self.client.get("/subjects/old-house/")
+        self.assertRedirects(
+            response,
+            "/subjects/Q3001-old-house/",
+            status_code=301,
+            fetch_redirect_response=False,
+        )
+
+    def test_unknown_legacy_slug_is_not_found(self):
+        self.assertEqual(self.client.get("/subjects/no-such-subject/").status_code, 404)
+        self.assertEqual(
+            self.client.get("/subjects/no-such-subject/similar/").status_code, 404
+        )
+
+    def test_map_page_is_not_shadowed_by_subject_routes(self):
+        response = self.client.get("/subjects/map/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "subjects/subjects_map.html")
+        self.assertContains(response, 'data-info-url="/subjects/api/map-info/Q0/"')
+        self.assertContains(response, 'data-subject-url="/subjects/Q0/"')
+
+    def test_map_info_is_keyed_by_qid_and_returns_the_url_key(self):
+        for path in (
+            "/subjects/api/map-info/Q3001/",
+            "/subjects/api/map-info/Q3001-old-house/",
+        ):
+            with self.subTest(path=path):
+                data = self.client.get(path).json()
+                self.assertEqual(data["key"], "Q3001-old-house")
+                self.assertEqual(data["url"], "/subjects/Q3001-old-house/")
+                self.assertEqual(data["wikidata_id"], "Q3001")
+                self.assertNotIn("slug", data)
+
+    def test_import_subjects_field_accepts_qids_and_unambiguous_slugs(self):
+        field = ImportCommitSerializer().fields["subjects"]
+        self.assertEqual(
+            field.run_validation(["Q3002", "corner-store"]),
+            [self.twin, self.store],
+        )
+
+    def test_import_subjects_field_rejects_an_ambiguous_slug(self):
+        field = ImportCommitSerializer().fields["subjects"]
+        with self.assertRaisesMessage(DRFValidationError, "Q-ID"):
+            field.run_validation(["old-house"])
+
+    def test_import_subjects_field_rejects_an_unknown_qid(self):
+        field = ImportCommitSerializer().fields["subjects"]
+        with self.assertRaises(DRFValidationError):
+            field.run_validation(["Q999999"])

@@ -423,7 +423,7 @@ Creates the `Image` row and moves the uploaded file to its permanent location.
 | `license_name`  | string  | no       | Exact `name` of a [recognized license](licenses.md). Unknown values are rejected. |
 | `rotation`      | integer | no       | Display rotation in degrees clockwise: `0`, `90`, `180`, or `270`. Default `0`. |
 | `mirror`        | string  | no       | Display mirror: `"none"`, `"h"`, or `"v"`. Default `"none"`. |
-| `subjects`      | array   | no       | List of [Subject](subjects.md) slugs to tag on the image, in the order given. Each must match an existing subject's `slug`; unknown slugs are rejected. Default `[]`. |
+| `subjects`      | array   | no       | List of [Subjects](subjects.md) to tag on the image, in the order given, each identified by its Wikidata Q-ID (e.g. `"Q5881191"`). Each must match an existing subject; unknown values are rejected. A subject's `slug` is also accepted, but slugs are not unique and one shared by several subjects is rejected, so prefer Q-IDs. Default `[]`. |
 
 The image bytes are uploaded as-is — `rotation` and `mirror` are stored as display metadata and applied at render time, not baked into the file. If you want the canonical bytes to be physically oriented, bake the transform in *before* uploading.
 
@@ -449,7 +449,8 @@ Example response (201 Created):
 | 400  | `license_name: License '...' is not recognized.`            | The provided license isn't in this instance's set — fetch [Licenses](licenses.md) for the allowed values. |
 | 400  | `edtf_date: Invalid EDTF date: ...`                         | The provided date doesn't parse as EDTF. |
 | 400  | `title: This field is required.`                            | A required field is missing or empty. |
-| 400  | `subjects: Object with slug=... does not exist.`            | One of the provided subject slugs doesn't match an existing subject. |
+| 400  | `subjects: Object with wikidata_id=... does not exist.`     | One of the provided Q-IDs doesn't match an existing subject (`slug=...` when a slug was given). |
+| 400  | `subjects: More than one subject has the slug ...; use its Wikidata Q-ID instead.` | The slug is shared by several subjects. |
 | 401  | `invalid_token`                                             | Access token missing, expired, or revoked. |
 | 403  | `insufficient_scope` / permission denied                    | Token lacks the `import` scope, or the user is not a contributor. |
 | 404  | `Import slot not found or does not belong to you.`          | Slot expired, doesn't exist, or was created by a different user. |

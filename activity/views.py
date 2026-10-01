@@ -263,7 +263,7 @@ def get_activity_events(
         subject_groups = (
             SubjectMappingActivityGroup.objects.filter(**subject_filter)
             .annotate(**subject_annotations)
-            .select_related("user", "subject")
+            .select_related("user", "subject", "subject__wikidata_item")
             .prefetch_related(
                 Prefetch(
                     "members",

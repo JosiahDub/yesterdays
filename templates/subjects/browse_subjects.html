@@ -78,9 +78,9 @@
                         <template x-if="suggestions.subjects.length > 0">
                             <div>
                                 <h6 class="dropdown-header mb-0">Subjects</h6>
-                                <template x-for="subj in suggestions.subjects" :key="subj.slug">
+                                <template x-for="subj in suggestions.subjects" :key="subj.wikidata_id">
                                     <a class="dropdown-item"
-                                       :href="'/subjects/' + subj.slug + '/'">
+                                       :href="subj.url">
                                         <span x-text="subj.title"></span>
                                         <small class="text-muted"
                                                x-show="subj.matched_alias"

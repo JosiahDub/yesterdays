@@ -63,7 +63,7 @@ The specification for the JSON sidecar format is as follows.
 | `license_name`  | string \| null   | no       | Checked case-insensitively against `GET /api/v2/licenses/` |
 | `rotation`      | integer          | yes      | Must be exactly `0`, `90`, `180`, or `270` |
 | `mirror`        | string           | yes      | Must be `"none"`, `"h"`, or `"v"` |
-| `subjects`      | array of strings | no       | Subject slugs, in order; absent or `null` means `[]`. There is no expectation to identify any subjects during import. |
+| `subjects`      | array of strings | no       | Wikidata Q-IDs of existing subjects (e.g. `"Q5881191"`), in order; absent or `null` means `[]`. Subject slugs are also accepted but aren't unique, so prefer Q-IDs. There is no expectation to identify any subjects during import. |
 
 
 ### EDTF Format

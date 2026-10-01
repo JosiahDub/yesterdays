@@ -32,7 +32,7 @@
         <ol class="breadcrumb">
             <li class="breadcrumb-item"><a href="{% url 'home' %}">Home</a></li>
             <li class="breadcrumb-item"><a href="{% url 'subjects:browse_subjects' %}">Subjects</a></li>
-            <li class="breadcrumb-item"><a href="{% url 'subjects:subject_detail' subject.slug %}">{{ subject.title }}</a></li>
+            <li class="breadcrumb-item"><a href="{{ subject.get_absolute_url }}">{{ subject.title }}</a></li>
             <li class="breadcrumb-item active" aria-current="page">Similar Images</li>
         </ol>
     </nav>
@@ -48,7 +48,7 @@
                         <p class="card-text">{{ subject.wikidata_item.description|truncatechars:300 }}</p>
                     {% endif %}
                     <div class="d-flex gap-2 align-items-center">
-                        <a href="{% url 'subjects:subject_detail' subject.slug %}" class="btn btn-primary">View Subject</a>
+                        <a href="{{ subject.get_absolute_url }}" class="btn btn-primary">View Subject</a>
                         {% if subject_image_count < total_subject_images %}
                             <span class="text-muted small">
                                 <i class="fas fa-info-circle me-1"></i>

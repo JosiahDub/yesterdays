@@ -175,7 +175,7 @@ Some subjects span multiple OSM elements (e.g., a street made up of several ways
 |---------------|---------|-------------|
 | `id`          | integer | Unique identifier |
 | `title`       | string  | Name of the subject |
-| `slug`        | string  | URL-friendly name |
+| `slug`        | string  | URL-friendly name. Not unique: two subjects can share a slug, and it can be empty. Use `wikidata.wikidata_id` to identify a subject. |
 | `description` | string  | Description of the subject, sourced from Wikidata (might fall back to placeholder) |
 | `wikidata`    | object  | Wikidata metadata (see below) |
 | `image_count` | integer | Number of public images tagged with this subject |
@@ -194,7 +194,7 @@ Some subjects span multiple OSM elements (e.g., a street made up of several ways
 
 | Parameter | Description |
 |-----------|-------------|
-| `slug`    | Filter by one or more exact, comma-separated slugs, matching any listed subject (e.g., `?slug=hollywood-cemetery,main-street-station`) |
+| `slug`    | Filter by one or more exact, comma-separated slugs, matching any listed subject (e.g., `?slug=hollywood-cemetery,main-street-station`). Slugs aren't unique, so one slug can return several subjects. |
 
 ## Ordering
 
