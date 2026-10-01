@@ -126,6 +126,7 @@ export async function setupMapDataLayers(ctx: MapDisplayContext): Promise<void> 
         layout: {
           "icon-image": DIRECTION_SPRITE_ID,
           "icon-overlap": "always",
+          "icon-ignore-placement": true,
           "icon-size": 1,
           "icon-rotate": currentImageDirection,
           "icon-rotation-alignment": "map",

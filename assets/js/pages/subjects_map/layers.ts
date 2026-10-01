@@ -194,6 +194,7 @@ async function addDirectionLayer(map: MapLibreMap): Promise<void> {
         layout: {
           "icon-image": DIRECTION_ICON,
           "icon-overlap": "always",
+          "icon-ignore-placement": true,
           "icon-size": ["interpolate", ["linear"], ["zoom"], 5, 0.3, 15, 1],
           "icon-rotate": ["to-number", ["get", "direction"]],
           "icon-rotation-alignment": "map",

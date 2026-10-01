@@ -283,6 +283,7 @@ export async function addMapSourcesAndLayers(
         layout: {
           "icon-image": DIRECTION_SPRITE_ID,
           "icon-overlap": "always",
+          "icon-ignore-placement": true,
           "icon-size": ["interpolate", ["linear"], ["zoom"], 5, 0.3, 15, 1],
           "icon-rotate": ["to-number", ["get", "direction"]],
           "icon-rotation-alignment": "map",

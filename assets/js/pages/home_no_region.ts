@@ -151,6 +151,7 @@ function initHeroMap(container: HTMLElement): maplibregl.Map | undefined {
           layout: {
             "icon-image": DIRECTION_SPRITE_ID,
             "icon-overlap": "always",
+            "icon-ignore-placement": true,
             "icon-size": 1,
             "icon-rotate": direction,
             "icon-rotation-alignment": "map",

@@ -206,6 +206,7 @@ export function directionSymbolLayer(
     layout: {
       "icon-image": DIRECTION_SPRITE_ID,
       "icon-overlap": "always",
+      "icon-ignore-placement": true,
       "icon-size": [
         "interpolate",
         ["exponential", 0.7],
@@ -278,6 +279,7 @@ export function simpleDirectionSymbolLayer(
     layout: {
       "icon-image": DIRECTION_SPRITE_ID,
       "icon-overlap": "always",
+      "icon-ignore-placement": true,
       "icon-size": 1,
       "icon-rotate": ["to-number", ["get", "direction"]],
       "icon-rotation-alignment": "map",
