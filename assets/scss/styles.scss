@@ -30,6 +30,13 @@ $body-bg: #fffdf9;
 $body-color-dark: #f4ecd6;
 $body-bg-dark: #0b1722;
 
+// Bootstrap derives these from the warm grays ($gray-800 and a mix toward
+// $gray-900), which sit as gray patches on the navy body. Lighter steps of
+// the body's own navy instead, keeping Bootstrap's order: tertiary between
+// body and secondary.
+$body-secondary-bg-dark: #1a2c3d;
+$body-tertiary-bg-dark: #14222e;
+
 $body-secondary-bg: #f5f2eb;
 $body-tertiary-bg: #f0ede6;
 

@@ -185,12 +185,20 @@
     }
 }
 
-/* --- Stat band ---------------------------------------------------------- */
+/* --- Stat band ----------------------------------------------------------
+   $primary is a dark teal that Bootstrap leaves as-is in dark mode, where
+   on the band's navy it all but disappears, so dark mode uses $light. */
 .home-stat-value {
     font-size: clamp(1.75rem, 1.2rem + 2vw, 2.5rem);
     font-weight: 600;
     line-height: 1.1;
     color: var(--bs-primary);
+}
+
+@media (prefers-color-scheme: dark) {
+    .home-stat-value {
+        color: var(--bs-light);
+    }
 }
 
 .home-stat-label {
