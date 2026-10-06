@@ -22,6 +22,16 @@
                     </div>
                     <small class="text-muted">Search by name, or enter a Wikidata ID and click + to add</small>
                 </div>
+                {% if quick_add_subject %}
+                <div class="mb-3">
+                    <button type="button" class="btn btn-sm btn-outline-primary" id="bulkQuickAddSubjectBtn"
+                            data-subject-id="{{ quick_add_subject.pk }}"
+                            data-subject-title="{{ quick_add_subject.title }}"
+                            data-wikidata-id="{{ quick_add_subject.wikidata_item.wikidata_id }}">
+                        <i class="fas fa-plus me-1"></i>Quick add: {{ quick_add_subject.title }}
+                    </button>
+                </div>
+                {% endif %}
                 <div id="bulkSelectedSubjects">
                     <p class="mb-2 text-muted small">Selected subjects (click x to remove):</p>
                     <div id="bulkSelectedSubjectsList" class="d-flex flex-wrap gap-2 mb-2">

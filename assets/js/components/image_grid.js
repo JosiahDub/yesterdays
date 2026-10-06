@@ -279,6 +279,14 @@ export function imageGrid() {
           });
         }
 
+        // Set up the quick-add button (only rendered on pages about a subject)
+        const quickAddBtn = document.getElementById("bulkQuickAddSubjectBtn");
+        if (quickAddBtn) {
+          quickAddBtn.addEventListener("click", () => {
+            this.quickAddSubject(quickAddBtn.dataset);
+          });
+        }
+
         inputEl.addEventListener("keydown", (e) => {
           if (e.key === "Enter") {
             const value = inputEl.value.trim();
@@ -370,12 +378,37 @@ export function imageGrid() {
     },
 
     /**
+     * Add the page's subject (from the quick-add button's data attributes)
+     * to the selected subjects list
+     */
+    quickAddSubject({ subjectId, subjectTitle, wikidataId }) {
+      if (this.selectedBulkSubjects.some((s) => s.wikidata_id === wikidataId)) {
+        return;
+      }
+      this.selectedBulkSubjects.push({
+        id: Number(subjectId),
+        title: subjectTitle,
+        wikidata_id: wikidataId,
+      });
+      this.renderBulkSelectedSubjects();
+      document.getElementById("bulkAddSubjectBtn").disabled = false;
+    },
+
+    /**
      * Render the list of selected subjects in the modal
      */
     renderBulkSelectedSubjects() {
       const container = document.getElementById("bulkSelectedSubjectsList");
       const emptyMessage = document.getElementById("emptySubjectsMessage");
       if (!container) return;
+
+      // Disable quick-add while its subject is already in the list
+      const quickAddBtn = document.getElementById("bulkQuickAddSubjectBtn");
+      if (quickAddBtn) {
+        quickAddBtn.disabled = this.selectedBulkSubjects.some(
+          (s) => s.wikidata_id === quickAddBtn.dataset.wikidataId,
+        );
+      }
 
       if (this.selectedBulkSubjects.length === 0) {
         container.innerHTML = "";

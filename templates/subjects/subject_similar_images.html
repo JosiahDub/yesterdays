@@ -91,7 +91,7 @@
                 </div>
 
                 {% if user.is_authenticated %}
-                    {% include 'images/partials/bulk_modals.html' %}
+                    {% include 'images/partials/bulk_modals.html' with quick_add_subject=subject %}
                 {% endif %}
             {% else %}
                 {% include 'images/partials/empty_images.html' with empty_message="Could not find any images with similar content." empty_icon="fa-search" %}
