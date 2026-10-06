@@ -75,7 +75,7 @@ export default defineConfig({
           __dirname,
           "./assets/js/pages/subjects_map/index.ts",
         ),
-        from_above: path.resolve(__dirname, "./assets/js/pages/from_above.js"),
+        from_above: path.resolve(__dirname, "./assets/js/pages/from_above.ts"),
         georeference_interface: path.resolve(
           __dirname,
           "./assets/js/pages/georeference_interface/index.ts",
