@@ -1359,7 +1359,7 @@ class SiteSettingsAdmin(admin.ModelAdmin):
             "Homepage Subjects Band",
             {
                 "fields": ("home_subjects_image", "home_subjects_order"),
-                "description": 'The photograph labelled in the homepage\'s "The Rabbithole Goes Deep" band, shown with the subjects tagged in it. Leave empty to hide the band.',
+                "description": 'The photograph labelled in the homepage\'s "The Rabbit Hole Goes Deep" band, shown with the subjects tagged in it. Leave empty to hide the band.',
             },
         ),
     )

@@ -1785,7 +1785,7 @@ class GlobalHomeSubjectsTests(TestCase):
         mapping = self._tag(image, "Main Street Station", "Q1")
         self.assertIsNotNone(self._feature(image))
         response = self.client.get(reverse("home"))
-        self.assertContains(response, "The Rabbithole Goes Deep")
+        self.assertContains(response, "The Rabbit Hole Goes Deep")
         self.assertContains(response, mapping.subject.get_absolute_url())
 
     def test_no_chosen_photograph_hides_the_band(self):
@@ -1794,7 +1794,7 @@ class GlobalHomeSubjectsTests(TestCase):
         response = self.client.get(reverse("home"))
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.context["subjects_feature"])
-        self.assertNotContains(response, "The Rabbithole Goes Deep")
+        self.assertNotContains(response, "The Rabbit Hole Goes Deep")
 
     def test_untagged_photograph_hides_the_band(self):
         # Nothing to label it with, so the band would be a picture under a
