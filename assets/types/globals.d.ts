@@ -5,6 +5,7 @@ import type {
 } from "../js/components/layer_control/types";
 import type { MapDisplayConfig } from "../js/components/map_display/types";
 import type { MapBounds } from "../js/constants/map";
+import type { FromAboveConfig } from "../js/pages/from_above_georeference_interface";
 import type { GeoreferenceConfig } from "../js/pages/georeference_interface/types";
 import type { SubjectBrowserConfig } from "../js/pages/browse_subjects";
 
@@ -78,6 +79,10 @@ declare global {
     // Django-serialized configuration for the point georeference interface,
     // set inline by templates/images/georeference_interface.html
     georeferenceConfig?: GeoreferenceConfig;
+
+    // Django-serialized configuration for the aerial (polygon) georeference
+    // interface, set inline by templates/images/from_above_georeference_interface.html
+    fromAboveConfig?: FromAboveConfig;
 
     // Django-serialized configuration for the subject browser, set inline by
     // templates/subjects/browse_subjects.html.
