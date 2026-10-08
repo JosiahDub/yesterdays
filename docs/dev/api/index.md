@@ -149,7 +149,9 @@ Most endpoints support filtering and ordering via query parameters. Each endpoin
     ```python
     import requests
 
-    response = requests.get("https://yesterdays.today/api/v2/images/", params={"collection": 5})
+    response = requests.get(
+        "https://yesterdays.today/api/v2/images/", params={"collection": 5}
+    )
     data = response.json()
     ```
 
@@ -177,7 +179,9 @@ To change the sort order, use the `ordering` parameter:
     ```python
     import requests
 
-    response = requests.get("https://yesterdays.today/api/v2/images/", params={"ordering": "original_date"})
+    response = requests.get(
+        "https://yesterdays.today/api/v2/images/", params={"ordering": "original_date"}
+    )
     data = response.json()
     ```
 
@@ -205,7 +209,9 @@ Prefix with `-` to sort descending:
     ```python
     import requests
 
-    response = requests.get("https://yesterdays.today/api/v2/images/", params={"ordering": "-original_date"})
+    response = requests.get(
+        "https://yesterdays.today/api/v2/images/", params={"ordering": "-original_date"}
+    )
     data = response.json()
     ```
 

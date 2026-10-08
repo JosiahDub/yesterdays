@@ -203,9 +203,12 @@ The format is `in_bbox=west,south,east,north` (minimum longitude, minimum latitu
     import requests
 
     # Georeferences in downtown Richmond
-    response = requests.get("https://yesterdays.today/api/v2/georeferences/", params={
-        "in_bbox": "-77.45,37.53,-77.43,37.55",
-    })
+    response = requests.get(
+        "https://yesterdays.today/api/v2/georeferences/",
+        params={
+            "in_bbox": "-77.45,37.53,-77.43,37.55",
+        },
+    )
     data = response.json()
     ```
 
@@ -257,10 +260,13 @@ Find all high-confidence georeferences from the Library of Virginia:
     ```python
     import requests
 
-    response = requests.get("https://yesterdays.today/api/v2/georeferences/", params={
-        "source": 1,
-        "confidence": "high",
-    })
+    response = requests.get(
+        "https://yesterdays.today/api/v2/georeferences/",
+        params={
+            "source": 1,
+            "confidence": "high",
+        },
+    )
     data = response.json()
     ```
 

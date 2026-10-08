@@ -240,9 +240,12 @@ Then use the `timestamp` of the last event to fetch the next page:
     ```python
     import requests
 
-    response = requests.get("https://yesterdays.today/api/v2/activity/", params={
-        "before": "2026-02-20T01:58:16Z",
-    })
+    response = requests.get(
+        "https://yesterdays.today/api/v2/activity/",
+        params={
+            "before": "2026-02-20T01:58:16Z",
+        },
+    )
     data = response.json()
     ```
 
@@ -272,9 +275,12 @@ Show only comments and milestones:
     ```python
     import requests
 
-    response = requests.get("https://yesterdays.today/api/v2/activity/", params={
-        "types": "comment,user_milestone",
-    })
+    response = requests.get(
+        "https://yesterdays.today/api/v2/activity/",
+        params={
+            "types": "comment,user_milestone",
+        },
+    )
     data = response.json()
     ```
 

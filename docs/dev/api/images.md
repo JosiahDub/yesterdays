@@ -117,12 +117,15 @@ Find all georeferenced images from the Valentine, taken between 1900 and 1920:
     ```python
     import requests
 
-    response = requests.get("https://yesterdays.today/api/v2/images/", params={
-        "source": 2,
-        "georeferenced": "true",
-        "year_min": 1900,
-        "year_max": 1920,
-    })
+    response = requests.get(
+        "https://yesterdays.today/api/v2/images/",
+        params={
+            "source": 2,
+            "georeferenced": "true",
+            "year_min": 1900,
+            "year_max": 1920,
+        },
+    )
     data = response.json()
     ```
 
@@ -162,9 +165,12 @@ Prefix with `-` to sort descending. For example, `ordering=original_date` gives 
     import requests
 
     # Most recently georeferenced images first
-    response = requests.get("https://yesterdays.today/api/v2/images/", params={
-        "ordering": "-last_georeferenced_at",
-    })
+    response = requests.get(
+        "https://yesterdays.today/api/v2/images/",
+        params={
+            "ordering": "-last_georeferenced_at",
+        },
+    )
     data = response.json()
     ```
 

@@ -32,9 +32,12 @@ Uses a [CLIP](https://en.wikipedia.org/wiki/Contrastive_Language-Image_Pre-train
     ```python
     import requests
 
-    response = requests.get("https://yesterdays.today/api/v2/search/semantic/", params={
-        "q": "church on a hill",
-    })
+    response = requests.get(
+        "https://yesterdays.today/api/v2/search/semantic/",
+        params={
+            "q": "church on a hill",
+        },
+    )
     data = response.json()
     ```
 
@@ -106,9 +109,12 @@ Results are ranked by how closely the query matches, with the best matches first
     ```python
     import requests
 
-    response = requests.get("https://yesterdays.today/api/v2/search/text/", params={
-        "q": "broad street",
-    })
+    response = requests.get(
+        "https://yesterdays.today/api/v2/search/text/",
+        params={
+            "q": "broad street",
+        },
+    )
     data = response.json()
     ```
 
@@ -198,11 +204,14 @@ Examples:
     ```python
     import requests
 
-    response = requests.get("https://yesterdays.today/api/v2/search/in-view/", params={
-        "lat": 37.5407,
-        "lon": -77.4360,
-        "radius": 500,
-    })
+    response = requests.get(
+        "https://yesterdays.today/api/v2/search/in-view/",
+        params={
+            "lat": 37.5407,
+            "lon": -77.4360,
+            "radius": 500,
+        },
+    )
     data = response.json()
     ```
 
@@ -331,11 +340,14 @@ Find images matching "hotel" from the Library of Virginia, taken before 1920:
     ```python
     import requests
 
-    response = requests.get("https://yesterdays.today/api/v2/search/text/", params={
-        "q": "hotel",
-        "source": 1,
-        "year_max": 1920,
-    })
+    response = requests.get(
+        "https://yesterdays.today/api/v2/search/text/",
+        params={
+            "q": "hotel",
+            "source": 1,
+            "year_max": 1920,
+        },
+    )
     data = response.json()
     ```
 
