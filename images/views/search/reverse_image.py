@@ -14,6 +14,7 @@ from psycopg import sql
 from regions.context_processors import get_current_region
 
 from ... import clip_client
+from ...embeddings import QUERY_VECTOR_SQL, VECTOR_SQL
 from ...models import Image
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ def _get_image_embedding(sanitized_image):
 @login_required
 @require_http_methods(["POST"])
 def reverse_image_search(request):
-    """API endpoint for reverse image search using CLIP embeddings - requires authentication.
+    """API endpoint for reverse image search using image embeddings - requires authentication.
 
     Supports format=html parameter to return rendered HTML cards instead of JSON.
     """
@@ -217,29 +218,11 @@ def reverse_image_search(request):
             )
 
         query_dimension = len(query_embedding)
-
-        # Check dimension compatibility with database
-        sample_embedding = None
-        expected_dimension = None
-
-        with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT embedding
-                FROM images_image
-                WHERE embedding IS NOT NULL AND is_searchable = true
-                LIMIT 1
-            """)
-            result = cursor.fetchone()
-            if result:
-                sample_embedding = result[0]
-                expected_dimension = len(sample_embedding)
-
-        # Check dimension compatibility
-        if expected_dimension and query_dimension != expected_dimension:
+        if query_dimension != settings.EMBEDDING_DIMENSION:
             return JsonResponse(
                 {
                     "success": False,
-                    "error": f"Model dimension mismatch. Database contains {expected_dimension}D embeddings, but current model produces {query_dimension}D embeddings.",
+                    "error": f"Model dimension mismatch. Database contains {settings.EMBEDDING_DIMENSION}D embeddings, but current model produces {query_dimension}D embeddings.",
                 },
                 status=400,
             )
@@ -348,14 +331,18 @@ def reverse_image_search(request):
                     edtf_date,
                     start_decdate,
                     end_decdate,
-                    (embedding::vector(768) <=> %s::vector(768)) as distance
+                    ({vector} <=> {query_vector}) as distance
                 FROM images_image
                 WHERE {where_clause}
                 AND is_searchable = true
-                ORDER BY embedding::vector(768) <=> %s::vector(768), id ASC
+                ORDER BY {vector} <=> {query_vector}, id ASC
                 LIMIT %s
                 OFFSET %s
-            """).format(where_clause=sql.SQL(where_clause))
+            """).format(
+                where_clause=sql.SQL(where_clause),
+                vector=sql.SQL(VECTOR_SQL),
+                query_vector=sql.SQL(QUERY_VECTOR_SQL),
+            )
 
             # Pass embedding as parameter - pgvector accepts array format
             query_params = (
@@ -466,6 +453,8 @@ def reverse_image_search(request):
                     "has_more": has_more,
                     "total_count": total_count,
                     "page": page,
+                    "match_high": settings.SEARCH_MATCH_BADGE_HIGH,
+                    "match_medium": settings.SEARCH_MATCH_BADGE_MEDIUM,
                 },
             )
 

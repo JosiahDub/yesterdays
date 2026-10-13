@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.admin.views.decorators import staff_member_required
 from django.core.exceptions import ValidationError
@@ -73,6 +74,8 @@ def duplicate_image_pairs(request):
         "dismissed_count": len(dismissed),
         "last_run": last_run,
         "resolved_count": total - len(active) - len(dismissed),
+        "distance_high": settings.DUPLICATE_DISTANCE_BADGE_HIGH,
+        "distance_medium": settings.DUPLICATE_DISTANCE_BADGE_MEDIUM,
     }
     return render(request, "images/duplicate_image_pairs.html", context)
 
@@ -148,6 +151,8 @@ def duplicate_pair_detail(request, pair_uuid):
         # One image has since been marked as a duplicate elsewhere.
         "resolved": bool(image_a.duplicate_of_id or image_b.duplicate_of_id),
         "dismissed_pair": dismissed_pair,
+        "distance_high": settings.DUPLICATE_DISTANCE_BADGE_HIGH,
+        "distance_medium": settings.DUPLICATE_DISTANCE_BADGE_MEDIUM,
     }
     return render(request, "images/duplicate_pair_detail.html", context)
 

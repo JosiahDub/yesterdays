@@ -13,6 +13,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.decorators.http import require_http_methods
 
+from ..embeddings import QUERY_VECTOR_SQL, VECTOR_SQL
 from ..models import (
     CollectionRegionStats,
     CollectionStats,
@@ -657,11 +658,11 @@ def label_scales(request):
                 else:
                     with connection.cursor() as cursor:
                         # Find images with embeddings and order by similarity
-                        sql = """
-                            SELECT id, (embedding::vector(768) <=> %s::vector(768)) as distance
+                        sql = f"""
+                            SELECT id, ({VECTOR_SQL} <=> {QUERY_VECTOR_SQL}) as distance
                             FROM images_image
                             WHERE id = ANY(%s) AND embedding IS NOT NULL
-                            ORDER BY embedding::vector(768) <=> %s::vector(768)
+                            ORDER BY {VECTOR_SQL} <=> {QUERY_VECTOR_SQL}
                         """
                         cursor.execute(
                             sql, [embedding_str, base_image_ids, embedding_str]

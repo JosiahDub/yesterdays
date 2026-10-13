@@ -1,8 +1,9 @@
 """
-Django management command to generate CLIP embeddings for images.
+Django management command to generate image embeddings.
 
-Embeddings are produced by the CLIP microservice (services/clip), reached via
-``CLIP_SERVICE_URL``. This command downloads each image, shrinks it, and posts
+Embeddings are produced by the embedding microservice (services/clip), reached
+via ``CLIP_SERVICE_URL``. This command downloads each image's displayed
+version (the rotated/mirrored copy when there is one), shrinks it, and posts
 it to the service; the service handles preprocessing and encoding.
 
 With ``--queue`` the work is handed to the background Celery queue instead of
@@ -24,7 +25,7 @@ from images.tasks import embed_image_url, generate_embeddings_batch
 
 
 class Command(BaseCommand):
-    help = "Generate CLIP embeddings for images via the CLIP service"
+    help = "Generate image embeddings via the embedding service"
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -33,7 +34,7 @@ class Command(BaseCommand):
             default=100,
             help="Number of images to commit to the database per batch (default: 100)",
         )
-        # The CLIP service encodes vision requests serially (one infer request
+        # The service encodes vision requests serially (one infer request
         # behind a lock, per replica), so raising concurrency past the replica
         # count only stacks requests behind that lock until they hit
         # CLIP_SERVICE_TIMEOUT.
@@ -125,7 +126,9 @@ class Command(BaseCommand):
 
     def get_images_queryset(self, options):
         """Get the queryset of images to process"""
-        queryset = Image.objects.only("id", "permalink", "embedding")
+        queryset = Image.objects.only(
+            "id", "permalink", "transformed_permalink", "embedding"
+        )
 
         if options["image_ids"]:
             # Overwrite the raw "1,2,3" string with the parsed list[int] so
@@ -149,7 +152,10 @@ class Command(BaseCommand):
 
     def process_batch(self, batch_images, pool) -> tuple[int, int]:
         """Encode a batch of images concurrently and bulk-save the results."""
-        successful_images = list(pool.map(self.embed_image, batch_images))
+        try:
+            successful_images = list(pool.map(self.embed_image, batch_images))
+        except clip_client.ClipServiceMismatch as e:
+            raise CommandError(str(e)) from e
         successful_images = [image for image in successful_images if image is not None]
 
         if successful_images:
@@ -164,8 +170,12 @@ class Command(BaseCommand):
         failure (already logged).
         """
         try:
-            image.embedding = embed_image_url(image.permalink)
+            image.embedding = embed_image_url(image.display_permalink)
             return image
+        except clip_client.ClipServiceMismatch:
+            # Wrong model behind CLIP_SERVICE_URL: every image would fail the
+            # same way, so let it abort the run (pool.map re-raises it).
+            raise
         except Exception as e:
             self.stderr.write(
                 self.style.ERROR(f"Error processing image {image.id}: {e}")

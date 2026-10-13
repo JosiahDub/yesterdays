@@ -136,7 +136,7 @@ services:
       target: dev
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     environment:
-      # CPU-only in dev; the vision tower targets the Arc GPU in production.
+      # CPU-only (fp32) in dev; production runs both towers fp16 on an Arc GPU.
       CLIP_TEXT_DEVICE: CPU
       CLIP_VISION_DEVICE: CPU
     volumes:

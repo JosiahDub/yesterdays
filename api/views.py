@@ -2,6 +2,7 @@ import logging
 import mimetypes
 from datetime import datetime
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import DatabaseError, connection, transaction
@@ -37,6 +38,7 @@ from rest_framework.response import Response
 from rest_framework_gis.filters import InBBoxFilter
 
 from activity.views import get_activity_events
+from images.embeddings import VECTOR_SQL
 from images.models import (
     AerialGeoreference,
     AerialGeoreferenceValidation,
@@ -1304,7 +1306,7 @@ def _format_search_result(request, image, distance):
 
 @api_view(["GET"])
 def semantic_search_view(request):
-    """Search images by meaning using CLIP embeddings.
+    """Search images by meaning using image embeddings.
 
     Encodes the query text into a vector and finds images whose visual
     content is most similar, even if the words don't appear in the title
@@ -1350,6 +1352,13 @@ def semantic_search_view(request):
     except Exception:
         logger.warning("Failed to generate text embedding", exc_info=True)
         return Response({"error": "Could not process search query."}, status=400)
+    if len(query_embedding) != settings.EMBEDDING_DIMENSION:
+        logger.warning(
+            "Text embedding has %d dimensions, expected %d",
+            len(query_embedding),
+            settings.EMBEDDING_DIMENSION,
+        )
+        return Response({"error": "Could not process search query."}, status=400)
 
     where_conditions = [
         sql.SQL("embedding IS NOT NULL"),
@@ -1358,24 +1367,37 @@ def semantic_search_view(request):
     where_conditions.extend(extra_conditions)
     where_clause = sql.SQL(" AND ").join(where_conditions)
 
+    # The named-parameter form of images.embeddings.QUERY_VECTOR_SQL.
+    query_vector = sql.SQL(f"%(embedding)s::vector({settings.EMBEDDING_DIMENSION})")
+
     try:
-        with connection.cursor() as cursor:
+        with transaction.atomic(), connection.cursor() as cursor:
+            # Raise pgvector's HNSW search depth from its default of 40, as
+            # the HTML search does. Scoped to this transaction via SET LOCAL.
+            cursor.execute("SET LOCAL hnsw.ef_search = %s", [settings.HNSW_EF_SEARCH])
+
             # Total count
             count_sql = sql.SQL(
                 "SELECT COUNT(id) FROM images_image WHERE {where}"
             ).format(where=where_clause)
             cursor.execute(count_sql, extra_params)
-            total_count = cursor.fetchone()[0]
+            # HNSW can only rank ef_search candidates per query, so deeper
+            # results aren't reachable even if more matching rows exist.
+            total_count = min(cursor.fetchone()[0], settings.HNSW_EF_SEARCH)
 
             # Paginated results
             query_sql = sql.SQL(
                 "SELECT id,"
-                " (embedding::vector(768) <=> %(embedding)s::vector(768)) AS distance"
+                " ({vector} <=> {query_vector}) AS distance"
                 " FROM images_image"
                 " WHERE {where}"
-                " ORDER BY embedding::vector(768) <=> %(embedding)s::vector(768), id"
+                " ORDER BY {vector} <=> {query_vector}, id"
                 " LIMIT %(limit)s OFFSET %(offset)s"
-            ).format(where=where_clause)
+            ).format(
+                where=where_clause,
+                vector=sql.SQL(VECTOR_SQL),
+                query_vector=query_vector,
+            )
 
             params = {
                 **extra_params,

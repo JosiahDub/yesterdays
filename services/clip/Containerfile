@@ -1,6 +1,7 @@
-# CLIP embedding microservice. Ubuntu (not Debian) because Arc/DG2 GPU
-# compute needs a newer Intel compute runtime than bookworm ships, and
-# Intel's official GPU apt repo targets Ubuntu LTS.
+# Image/text embedding microservice (OpenVINO; the bundle is currently
+# PE-Core L/14@336, described by its metadata.json). Ubuntu (not Debian)
+# because Arc/DG2 GPU compute needs a newer Intel compute runtime than
+# bookworm ships, and Intel's official GPU apt repo targets Ubuntu LTS.
 
 # Dependency stage: uv-managed Python + venv, mirroring the root Containerfile.
 FROM ubuntu:24.04 AS deps
@@ -49,7 +50,8 @@ COPY --from=deps /opt/uv/python /opt/uv/python
 COPY --from=deps /app/.venv /app/.venv
 COPY app ./app
 
-# Release image: the IR bundle is fetched as its own layer, placed before the
+# Release image: the IR bundle (model/ contents, packed by
+# scripts/export_ir.py) is fetched as its own layer, placed before the
 # venv and app code so it stays byte-stable (fixed mtimes) and registry-cached
 # across builds — uploaded and pulled only when the bundle version changes.
 FROM base AS release

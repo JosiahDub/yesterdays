@@ -12,6 +12,7 @@ from django.db import connection, models, transaction
 from django.db.models import Count, F, Q
 from django.db.models.functions import Coalesce, Lower
 
+from .embeddings import VECTOR_SQL
 from .utils import render_markdown_safe
 
 # Conditionally import SearchVectorField only if using PostgreSQL
@@ -681,7 +682,7 @@ class CollectionRegionStats(models.Model):
 
 class CollectionEmbeddingStats(models.Model):
     """
-    Per-collection mean CLIP embedding.
+    Per-collection mean image embedding.
 
     Used by subject similarity search (subjects/similarity.py) to build
     style-neutral query embeddings: subtracting a set image's collection mean
@@ -750,7 +751,7 @@ class CollectionEmbeddingStats(models.Model):
             # Aggregate in-database; parse pgvector's text form ("[0.1,...]")
             cursor.execute(
                 f"""
-                SELECT collection_id, COUNT(*), AVG(embedding::vector(768))::text
+                SELECT collection_id, COUNT(*), AVG({VECTOR_SQL})::text
                 FROM images_image
                 WHERE {where}
                 GROUP BY collection_id
@@ -781,7 +782,7 @@ class DuplicateImagePair(models.Model):
     A candidate visual-duplicate image pair from the nightly scan.
 
     images.tasks.refresh_duplicate_image_pairs wipes and repopulates this table
-    each night with the globally closest CLIP-embedding pairs among searchable
+    each night with the globally closest image-embedding pairs among searchable
     images. The staff review page (images:duplicate_image_pairs) reads it,
     hiding any pair whose images have since been marked duplicate_of so the list
     stays accurate between nightly runs.
@@ -1253,12 +1254,13 @@ class Image(models.Model):
         help_text="Whether this image appears in search results (auto-computed from collection/source visibility and duplicate status)",
     )
 
-    # Image embedding for CLIP similarity search
+    # Image embedding for semantic search and visual similarity. Cast to
+    # vector(EMBEDDING_DIMENSION) in queries; see images/embeddings.py.
     embedding = ArrayField(
         models.FloatField(),
         null=True,
         blank=True,
-        help_text="CLIP embedding vector for image similarity search (dimension varies by model)",
+        help_text="PE-Core L/14@336 embedding of the displayed image (settings.EMBEDDING_MODEL_ID, unit length)",
     )
 
     # Subjects that appear in this image

@@ -16,8 +16,8 @@ env:
   # One-time IR export bundle (see docs/dev/deployment/clip-service.md).
   # Produced by services/clip/scripts/export_ir.py and uploaded to R2; update
   # both values together when publishing a new bundle version.
-  MODEL_BUNDLE_URL: "https://cdn.yesterdays.maprva.org/models/clip-vit-l14-336-ir-v1.tar.gz"
-  MODEL_BUNDLE_SHA256: "7e6a5ee81c2f6f34320badefef74cb9135a0b13a92834957b3821eae1052ba1f"
+  MODEL_BUNDLE_URL: "https://cdn.yesterdays.maprva.org/models/pe-core-l14-336-ir-v1.tar.gz"
+  MODEL_BUNDLE_SHA256: "4d74f2ab6005c5e7aa1234f1105691b6bae1cd45cf95af2f7f3c3d1515889080"
 
 jobs:
   build:

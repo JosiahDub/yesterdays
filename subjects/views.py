@@ -39,6 +39,7 @@ from activity.models import (
     SubjectIntroduction,
     SubjectMappingActivityGroup,
 )
+from images.embeddings import QUERY_VECTOR_SQL, VECTOR_SQL
 from images.models import Image, SubjectMapping, SubjectMappingActivity
 from images.policies import (
     editable_images_for,
@@ -1265,13 +1266,17 @@ def find_similar_images_to_subject(request, qid):
             query_sql = sql.SQL("""
                 SELECT
                     id,
-                    (embedding::vector(768) <=> %s::vector(768)) as distance
+                    ({vector} <=> {query_vector}) as distance
                 FROM images_image
                 WHERE {where_clause}
                 AND is_searchable = true
-                ORDER BY embedding::vector(768) <=> %s::vector(768), id ASC
+                ORDER BY {vector} <=> {query_vector}, id ASC
                 LIMIT %s OFFSET %s
-            """).format(where_clause=sql.SQL(where_clause))
+            """).format(
+                where_clause=sql.SQL(where_clause),
+                vector=sql.SQL(VECTOR_SQL),
+                query_vector=sql.SQL(QUERY_VECTOR_SQL),
+            )
             cursor.execute(
                 query_sql,
                 [embedding_str] + where_params + [embedding_str, per_page, offset],

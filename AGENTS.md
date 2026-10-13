@@ -4,7 +4,7 @@ Besides placing images on the map (our core goal), this app provides a growing r
 - users can login using OpenStreetMap accounts
 - favorite and share images
 - tag images with their "subjects" (people, buildings, monuments) linked to Wikidata and OpenStreetMap
-- search image descriptions, or their content ("semantic" search) using a CLIP model
+- search image descriptions, or their content ("semantic" search) using a PE-Core image/text embedding model
 - transcribe historical city directories with an LLM-assisted OCR pipeline
 - ...and much more!
 
@@ -12,7 +12,7 @@ Besides placing images on the map (our core goal), this app provides a growing r
 
 The Django project package is `yesterdays/` (settings, root `urls.py`, Celery app). The feature apps are:
 
-- **`images`** — the core app. Holds `Source`, `Collection`, `Image` (with EDTF dates, IIIF tiling, CLIP embeddings, transforms), the curation staging models (`PreCollection`, `PreImage`), point and aerial (`Georeference`, `AerialGeoreference`) georeferences plus their validations, subject tagging (`SubjectMapping`), `Album`, `Comment`/`ImageRating`, `ImageOfTheDay`, and singletons `SiteSettings` and `TileVersion`.
+- **`images`** — the core app. Holds `Source`, `Collection`, `Image` (with EDTF dates, IIIF tiling, PE-Core embeddings, transforms), the curation staging models (`PreCollection`, `PreImage`), point and aerial (`Georeference`, `AerialGeoreference`) georeferences plus their validations, subject tagging (`SubjectMapping`), `Album`, `Comment`/`ImageRating`, `ImageOfTheDay`, and singletons `SiteSettings` and `TileVersion`.
 - **`subjects`** — named entities attached to images. `Subject` links to a `WikidataItem` (cached Wikidata JSON) and `OsmElement` (cached OSM geometry). `SubjectAncestor` is a denormalized P31/P279 closure projected out of the Memgraph Wikidata mirror.
 - **`regions`** — admin-curated geographic regions backed by Wikidata (`Region` is one-to-one with a `subjects.WikidataItem`; its closure also mirrors the transitive P131 containment chain). `Source`, `Collection`, and `Image` carry an optional `region` FK resolved image → collection → source (`Image.effective_region`). `RegionAncestor` is a denormalized P131 containment closure projected out of the Memgraph mirror. Regions are admin-created only; the public surface is a navbar region selector (choice persisted in a cookie read by `regions.context_processors.current_region`) backed by an autocomplete endpoint at `/regions/api/autocomplete/`. No REST API exposure yet.
 - **`activity`** — the activity feed and milestones (`GeoreferenceGroup`, `UserMilestone`, `SitewideMilestone`, `SubjectIntroduction`).
@@ -23,7 +23,7 @@ The Django project package is `yesterdays/` (settings, root `urls.py`, Celery ap
 
 Several features are toggled by settings/env vars, e.g. `DIRECTORIES_ENABLED`, `PROMETHEUS_ENABLED`, `LOCAL_DEV`, `DJANGO_DEBUG`. Use `django.conf.settings` rather than reading env vars directly in app code.
 
-Besides the Django apps, **`services/clip/`** is a standalone microservice (own `pyproject.toml`/`uv.lock`/Containerfile, no Django imports) serving CLIP embeddings over HTTP via OpenVINO — CPU everywhere, Intel Arc GPU in production. Django talks to it through `images/clip_client.py` when `CLIP_SERVICE_URL` is set, and falls back to the legacy in-worker torch path when it isn't.
+Besides the Django apps, **`services/clip/`** is a standalone microservice (own `pyproject.toml`/`uv.lock`/Containerfile, no Django imports) serving image and text embeddings over HTTP via OpenVINO — CPU (fp32) in development and staging, fp16 on an Intel Arc GPU in production. It keeps its historical `clip` name and `CLIP_*` env vars. Django talks to it through `images/clip_client.py` when `CLIP_SERVICE_URL` is set; without it, embedding features are unavailable.
 
 ## Development environment (Docker Compose)
 
@@ -74,9 +74,9 @@ When modifying models or fields in `images`, `subjects`, or `activity`, check wh
 
 Celery handles background work (thumbnail and IIIF tile generation, embedding generation, metadata refresh) with **RabbitMQ** as the broker and **django-celery-results** for results. Tasks are routed across two queues, **`urgent`** and **`background`**, each served by its own worker. Celery Beat schedules periodic tasks, including rate-limited refreshes of external data from Wikidata and OpenStreetMap (one item per interval, so request volume is independent of worker count) and reconciliation of the Memgraph subject graph.
 
-## Semantic search (CLIP) and the database
+## Semantic search (PE-Core) and the database
 
-Semantic search uses an OpenAI **CLIP ViT-L/14@336px** model. All encoding happens in the standalone CLIP service (`services/clip/`, reached via `CLIP_SERVICE_URL`); Django posts query text and images to it through `images/clip_client.py`. Embeddings are 768-dimensional, stored on `Image.embedding` and queried with **pgvector** (HNSW index, cosine distance). The `generate_embeddings` management command backfills them by streaming images through the service.
+Every embedding feature (semantic search, similar images, reverse image search, subject similarity, duplicate detection) uses Meta's **PE-Core L/14@336** model (`settings.EMBEDDING_MODEL_ID`; it replaced OpenAI CLIP ViT-L/14@336 in October 2026). All encoding happens in the standalone service (`services/clip/`, reached via `CLIP_SERVICE_URL`); Django posts query text and images to it through `images/clip_client.py`, which rejects responses from any other model. Embeddings are **1024-dimensional** (`settings.EMBEDDING_DIMENSION`), computed from each image's *displayed* version (the rotated/mirrored copy when there is one, re-embedded when it changes), stored on `Image.embedding` and queried with **pgvector** (HNSW index, cosine distance). Queries must cast with `images.embeddings.VECTOR_SQL`/`QUERY_VECTOR_SQL` so they match the index expression. The `generate_embeddings` management command backfills them by streaming images through the service; `export_embeddings`/`import_embeddings` move vectors in and out as `.npz` files (see `docs/dev/deployment/clip-service.md`).
 
 The database is **PostgreSQL with PostGIS, pgvector, and pg_trgm** (trigram text search). Image dates are stored as **EDTF**. A couple of config models (`SiteSettings`, `TileVersion`) are singletons (pk=1).
 

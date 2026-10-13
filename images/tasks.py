@@ -23,6 +23,7 @@ from PIL import Image as PILImage
 from yesterdays.iiif import generate_and_upload_iiif_tiles
 
 from . import clip_client
+from .embeddings import QUERY_VECTOR_SQL, VECTOR_SQL
 from .models import (
     CollectionEmbeddingStats,
     CollectionRegionStats,
@@ -40,14 +41,13 @@ logger = logging.getLogger(__name__)
 # concurrent refresh is about to rewrite, not a tunable.
 EMPTY_REGION_STATS_TTL = timedelta(days=1)
 
-# Maximum side of the central square sent to CLIP. Cropping before shrinking
-# preserves detail in panoramas: the service resizes the shortest edge to
-# 336px and center-crops, so it would discard the outer regions anyway.
+# Maximum side of the image sent to the embedding service. The service squashes
+# the whole frame to its square input (336px), so this only bounds upload size.
 EMBEDDING_MAX_DIMENSION = 1024
 
 # Images per generate_embeddings_batch run, and how long one run may spend
 # encoding before handing the rest to its successor. The budget leaves room for
-# one more slow image (download + CLIP timeouts) under CELERY_TASK_SOFT_TIME_LIMIT.
+# one more slow image (download + service timeouts) under CELERY_TASK_SOFT_TIME_LIMIT.
 EMBEDDING_TASK_BATCH_SIZE = 50
 EMBEDDING_TASK_TIME_BUDGET = 120
 
@@ -80,6 +80,13 @@ def process_image(self, image_id: int, quality: int = 85, force: bool = False):
     needs_transform = image.has_transform and not image.transformed_permalink
     needs_thumbnail = not image.thumbnail
     needs_transform_cleanup = not image.has_transform and image.transformed_permalink
+    # The embedding is of the displayed image, so it goes stale whenever the
+    # transformed copy appears, changes or goes away. A changed transform
+    # clears transformed_permalink and thumbnail in Image.save, which lands in
+    # one of these. Images never embedded are left for generate_embeddings.
+    needs_reembed = image.embedding is not None and (
+        needs_transform or needs_transform_cleanup or needs_thumbnail
+    )
     # Legacy images predate versioned assets — their thumbnail/permalink point
     # at unversioned URLs, so re-emit them into a claimed generation directory.
     needs_migration = image.asset_generation == 0
@@ -185,6 +192,8 @@ def process_image(self, image_id: int, quality: int = 85, force: bool = False):
         logger.exception("Failed to process image %d", image_id)
         return
 
+    if needs_reembed and clip_client.is_configured():
+        generate_embeddings_batch.delay(force=True, image_ids=[image_id])
     generate_iiif_tiles.delay(image_id)
 
 
@@ -266,10 +275,12 @@ def download_image(url: str, timeout: int = 30) -> PILImage.Image | None:
 
 
 def embed_image_url(url: str, timeout: int = 30) -> list[float]:
-    """Download an image, prepare its central crop, and return its CLIP embedding.
+    """Download an image, shrink it, and return its embedding.
 
-    Raises on any failure (download, non-image response, decode, or the CLIP
-    service itself); callers decide how to report it.
+    The whole frame is sent: the service squashes it to the model's square
+    input, as the model was evaluated. Raises on any failure (download,
+    non-image response, decode, or the embedding service itself, including a
+    model mismatch); callers decide how to report it.
     """
     response = requests.get(url, timeout=timeout)
     response.raise_for_status()
@@ -280,10 +291,6 @@ def embed_image_url(url: str, timeout: int = 30) -> list[float]:
 
     with PILImage.open(BytesIO(response.content)) as img:
         img = to_rgb(img)
-    side = min(img.size)
-    left = (img.width - side) // 2
-    top = (img.height - side) // 2
-    img = img.crop((left, top, left + side, top + side))
     img.thumbnail(
         (EMBEDDING_MAX_DIMENSION, EMBEDDING_MAX_DIMENSION),
         PILImage.Resampling.LANCZOS,
@@ -569,7 +576,7 @@ def reconcile_collection_region_stats():
 
 @shared_task(ignore_result=True)
 def refresh_collection_embedding_stats():
-    """Recompute every collection's mean CLIP embedding.
+    """Recompute every collection's mean image embedding.
 
     These means power the style-neutral subject similarity query
     (subjects/similarity.py). The frequent refresh_next task below keeps them
@@ -615,12 +622,12 @@ def generate_embeddings_batch(
     force: bool = False,
     image_ids: list[int] | None = None,
 ):
-    """Generate CLIP embeddings for images lacking one, then queue the rest.
+    """Generate embeddings for images lacking one, then queue the rest.
 
     Works through up to EMBEDDING_TASK_BATCH_SIZE images in id order, stopping
     early once EMBEDDING_TASK_TIME_BUDGET is spent, and re-queues itself to
     continue after the last image it reached. As a single self-requeuing chain
-    it keeps one request in flight against the CLIP service (which encodes
+    it keeps one request in flight against the embedding service (which encodes
     serially per replica) however many worker processes are idle. Failures are
     logged and skipped, so they stay embedding-less for a later run to retry.
 
@@ -633,7 +640,9 @@ def generate_embeddings_batch(
         logger.warning("CLIP_SERVICE_URL is not set; skipping embedding generation")
         return
 
-    queryset = Image.objects.filter(id__gt=after_id).only("id", "permalink")
+    queryset = Image.objects.filter(id__gt=after_id).only(
+        "id", "permalink", "transformed_permalink"
+    )
     if not force:
         queryset = queryset.filter(embedding__isnull=True)
     if image_ids:
@@ -649,7 +658,12 @@ def generate_embeddings_batch(
             break
         last_id = image.id
         try:
-            embedding = embed_image_url(image.permalink)
+            embedding = embed_image_url(image.display_permalink)
+        except clip_client.ClipServiceMismatch:
+            # The service runs a different model than settings expect (e.g.
+            # mid-rollout); every image would fail alike, so end the chain.
+            logger.exception("Stopping embedding generation at image %s", image.id)
+            return
         except Exception as e:
             logger.warning("Failed to embed image %s: %s", image.id, e)
             continue
@@ -664,20 +678,20 @@ def refresh_duplicate_image_pairs():
     Rebuild the candidate visual-duplicate pair table (nightly).
 
     For every searchable, non-duplicate image, find its nearest neighbors by
-    CLIP-embedding cosine distance via the partial HNSW index, then keep the
+    embedding cosine distance via the partial HNSW index, then keep the
     globally closest settings.DUPLICATE_PAIRS_COUNT pairs. Binding each image's
-    own embedding back as a %s::vector(768) parameter guarantees the index is
+    own embedding back as a QUERY_VECTOR_SQL parameter guarantees the index is
     used, exactly as semantic search does. The whole table is then replaced
     atomically.
     """
-    neighbor_sql = """
-        SELECT id, (embedding::vector(768) <=> %s::vector(768)) AS distance
+    neighbor_sql = f"""
+        SELECT id, ({VECTOR_SQL} <=> {QUERY_VECTOR_SQL}) AS distance
         FROM images_image
         WHERE is_searchable = true
           AND embedding IS NOT NULL
           AND duplicate_of_id IS NULL
           AND id <> %s
-        ORDER BY embedding::vector(768) <=> %s::vector(768)
+        ORDER BY {VECTOR_SQL} <=> {QUERY_VECTOR_SQL}
         LIMIT %s
     """
     k = settings.DUPLICATE_PAIRS_NEIGHBORS

@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pyoxigraph
 import requests
+from django.conf import settings
 from django.contrib.admin.sites import AdminSite
 from django.contrib.admin.utils import flatten_fieldsets
 from django.contrib.auth.models import User
@@ -71,7 +72,7 @@ from .wikidata_closure import (
     parse_closure,
 )
 
-DIM = 768
+DIM = settings.EMBEDDING_DIMENSION
 
 SQUARE = {
     "type": "Polygon",
@@ -443,6 +444,38 @@ class BuildSubjectQueryEmbeddingTests(TestCase):
         )
         query = build_subject_query_embedding([(self.coll_a.pk, emb)])
         self.assertAlmostEqual(_cos(query, np.array(emb)), 1.0, places=5)
+
+    def _balancing_rows(self):
+        """Four images from collection A and one from B, with zero means.
+
+        Zero collection means make each residual the image itself, and
+        orthogonal images survive dedupe, so the query is just the weighted
+        mean of the one-hot images.
+        """
+        for collection in (self.coll_a, self.coll_b):
+            CollectionEmbeddingStats.objects.create(
+                collection=collection, mean_embedding=[0.0] * DIM, embedding_count=100
+            )
+        basis = np.eye(DIM)
+        rows = [(self.coll_a.pk, basis[i].tolist()) for i in range(4)]
+        return rows + [(self.coll_b.pk, basis[4].tolist())], basis
+
+    @override_settings(SUBJECT_SIMILARITY_COLLECTION_EXPONENT=1.0)
+    def test_collection_exponent_one_is_plain_average(self):
+        rows, basis = self._balancing_rows()
+        query = np.array(build_subject_query_embedding(rows))
+        expected = basis[:5].sum(axis=0)
+        self.assertAlmostEqual(_cos(query, expected), 1.0, places=6)
+
+    @override_settings(SUBJECT_SIMILARITY_COLLECTION_EXPONENT=0.5)
+    def test_collection_balancing_downweights_large_collection(self):
+        # Each of A's four images weighs 4 ** -0.5 = 0.5, B's single image 1:
+        # A's total say drops from 4/5 of the query to 2/3.
+        rows, basis = self._balancing_rows()
+        query = np.array(build_subject_query_embedding(rows))
+        expected = 0.5 * basis[:4].sum(axis=0) + basis[4]
+        self.assertAlmostEqual(_cos(query, expected), 1.0, places=6)
+        self.assertAlmostEqual(_cos(query, basis[4]), 1 / np.sqrt(2), places=6)
 
 
 class RefreshCollectionEmbeddingStatsTests(TestCase):

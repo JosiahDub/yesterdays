@@ -77,8 +77,15 @@ DIRECTORIES_ENABLED = os.getenv("DIRECTORIES_ENABLED", "True").lower() in (
 # those features to work.
 CLIP_SERVICE_URL = os.getenv("CLIP_SERVICE_URL", "").rstrip("/")
 # The vision tower encodes serially and a single CPU-only encode of
-# ViT-L/14@336px takes several seconds.
+# a ViT-L/14@336px model takes several seconds.
 CLIP_SERVICE_TIMEOUT = float(os.getenv("CLIP_SERVICE_TIMEOUT", "30"))
+
+# The embedding model behind every vector in Image.embedding. Fixed in code,
+# not env: the HNSW indexes are built on embedding::vector(EMBEDDING_DIMENSION)
+# (images/migrations/0069_pe_core_embeddings.py), and images.clip_client
+# rejects service responses from any other model so vectors never mix.
+EMBEDDING_MODEL_ID = "PE-Core-L-14-336"
+EMBEDDING_DIMENSION = 1024
 
 # pgvector HNSW search depth. Sets the per-query hnsw.ef_search parameter and
 # also caps how deep semantic-search pagination can go (the index can only rank
@@ -92,9 +99,18 @@ SUBJECT_SIMILARITY_SHRINKAGE_N0 = int(
     os.getenv("SUBJECT_SIMILARITY_SHRINKAGE_N0", "20")
 )
 # Cosine similarity above which two set images count as near-duplicates
-# (multiple scans/prints of one photo) and only the first is kept
+# (multiple scans/prints of one photo) and only the first is kept. Calibrated
+# for PE-Core: CLIP's 0.97 maps to 0.9695-0.9703 (yesterdays-embedding-eval
+# RESULTS.md, "Threshold calibration"), so it stays.
 SUBJECT_SIMILARITY_DEDUPE_COSINE = float(
     os.getenv("SUBJECT_SIMILARITY_DEDUPE_COSINE", "0.97")
+)
+# Collection balancing: each set image is weighted by n_c ** (exponent - 1),
+# where n_c is how many of the subject's kept images share its collection, so
+# a collection's total say grows as n_c ** exponent. 1.0 is a plain average;
+# 0.5 stops one big collection from dominating the query.
+SUBJECT_SIMILARITY_COLLECTION_EXPONENT = float(
+    os.getenv("SUBJECT_SIMILARITY_COLLECTION_EXPONENT", "0.5")
 )
 
 # Nightly visual-duplicate scan (images.tasks.refresh_duplicate_image_pairs).
@@ -107,6 +123,24 @@ DUPLICATE_PAIRS_EF_SEARCH = int(os.getenv("DUPLICATE_PAIRS_EF_SEARCH", "200"))
 DUPLICATE_PAIRS_BATCH_SIZE = int(os.getenv("DUPLICATE_PAIRS_BATCH_SIZE", "500"))
 # Hour (0-23, in CELERY_TIMEZONE) at which the nightly duplicate scan runs
 DUPLICATE_PAIRS_SCAN_HOUR = int(os.getenv("DUPLICATE_PAIRS_SCAN_HOUR", "4"))
+
+# Badge colours on the staff duplicate-pair pages: green below HIGH, amber
+# below MEDIUM (cosine distance). Like the "% match" badges below, quantile-
+# mapped from CLIP's 0.02/0.04 to PE-Core on the production corpus
+# (yesterdays-embedding-eval RESULTS.md, "Threshold calibration").
+DUPLICATE_DISTANCE_BADGE_HIGH = float(
+    os.getenv("DUPLICATE_DISTANCE_BADGE_HIGH", "0.021")
+)
+DUPLICATE_DISTANCE_BADGE_MEDIUM = float(
+    os.getenv("DUPLICATE_DISTANCE_BADGE_MEDIUM", "0.045")
+)
+# "% match" badge on semantic and reverse image search results (score =
+# cosine similarity x 100): green above HIGH, amber above MEDIUM. Calibrated on
+# image-to-image scores (CLIP's 80/60); text-to-image scores sit far below
+# both (top results ~0.27-0.44 for either model), so text queries stay grey.
+# Trigram text search keeps its own fixed 80/60.
+SEARCH_MATCH_BADGE_HIGH = int(os.getenv("SEARCH_MATCH_BADGE_HIGH", "74"))
+SEARCH_MATCH_BADGE_MEDIUM = int(os.getenv("SEARCH_MATCH_BADGE_MEDIUM", "53"))
 
 # Application definition
 

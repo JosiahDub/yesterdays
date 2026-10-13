@@ -23,12 +23,13 @@ def _load_encoder():
             config.TEXT_DEVICE,
             config.VISION_DEVICE,
             config.CACHE_DIR,
+            config.INFERENCE_PRECISION,
         )
         encoder.warmup()
     except Exception as exc:
         _load_error = str(exc)
         logger.critical(
-            "Failed to load CLIP model from %s — the service will stay "
+            "Failed to load embedding model from %s — the service will stay "
             "unready. Is the IR bundle present? (%s)",
             config.MODEL_DIR,
             exc,
@@ -36,7 +37,9 @@ def _load_encoder():
         return
     _encoder = encoder
     logger.info(
-        "CLIP model %s ready (devices: %s)", encoder.meta["model_id"], encoder.devices()
+        "Embedding model %s ready (devices: %s)",
+        encoder.meta["model_id"],
+        encoder.devices(),
     )
 
 
@@ -79,7 +82,7 @@ def embed_image(data: bytes = Body(media_type="application/octet-stream")):
         raise HTTPException(status_code=413, detail="Image too large")
     try:
         embedding = encoder.encode_image(data)
-    except UnidentifiedImageError, OSError, ValueError:
+    except (UnidentifiedImageError, OSError, ValueError):
         raise HTTPException(status_code=400, detail="Invalid image")
     return {
         "embedding": embedding,

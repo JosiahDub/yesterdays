@@ -13,19 +13,17 @@ from psycopg import sql
 from regions.context_processors import get_current_region
 
 from ... import clip_client
+from ...embeddings import QUERY_VECTOR_SQL, VECTOR_SQL
 from ...models import Image
 
 logger = logging.getLogger(__name__)
-
-# Fixed at the model + index level (ViT-L/14@336px → 768D, see migration 0036)
-CLIP_EMBEDDING_DIMENSION = 768
 
 # Query security setting shared by the text-input search modes.
 MAX_TEXT_QUERY_LENGTH = 500
 
 
 def _get_text_embedding(text):
-    """Encode text into a CLIP embedding via the CLIP service."""
+    """Encode text into an embedding via the embedding service."""
     return clip_client.get_text_embedding(text)
 
 
@@ -168,11 +166,11 @@ def semantic_search(request):
                 status=400,
             )
 
-        if len(query_embedding) != CLIP_EMBEDDING_DIMENSION:
+        if len(query_embedding) != settings.EMBEDDING_DIMENSION:
             return JsonResponse(
                 {
                     "success": False,
-                    "error": f"Model dimension mismatch. Database contains {CLIP_EMBEDDING_DIMENSION}D embeddings, but current model produces {len(query_embedding)}D embeddings. Please regenerate embeddings with the current model.",
+                    "error": f"Model dimension mismatch. Database contains {settings.EMBEDDING_DIMENSION}D embeddings, but current model produces {len(query_embedding)}D embeddings. Please regenerate embeddings with the current model.",
                 },
                 status=400,
             )
@@ -283,14 +281,18 @@ def semantic_search(request):
                     edtf_date,
                     start_decdate,
                     end_decdate,
-                    (embedding::vector(768) <=> %s::vector(768)) as distance
+                    ({vector} <=> {query_vector}) as distance
                 FROM images_image
                 WHERE {where_clause}
                 AND is_searchable = true
-                ORDER BY embedding::vector(768) <=> %s::vector(768), id ASC
+                ORDER BY {vector} <=> {query_vector}, id ASC
                 LIMIT %s
                 OFFSET %s
-            """).format(where_clause=sql.SQL(where_clause))
+            """).format(
+                where_clause=sql.SQL(where_clause),
+                vector=sql.SQL(VECTOR_SQL),
+                query_vector=sql.SQL(QUERY_VECTOR_SQL),
+            )
 
             # Pass embedding as parameter - pgvector accepts array format
             query_params = (
@@ -401,6 +403,8 @@ def semantic_search(request):
                     "has_more": has_more,
                     "total_count": total_count,
                     "page": page,
+                    "match_high": settings.SEARCH_MATCH_BADGE_HIGH,
+                    "match_medium": settings.SEARCH_MATCH_BADGE_MEDIUM,
                 },
             )
 
@@ -579,13 +583,17 @@ def find_similar_images(request, image_id):
             query_sql = sql.SQL("""
                 SELECT
                     id,
-                    (embedding::vector(768) <=> %s::vector(768)) as distance
+                    ({vector} <=> {query_vector}) as distance
                 FROM images_image
                 WHERE {where_clause}
                 AND is_searchable = true
-                ORDER BY embedding::vector(768) <=> %s::vector(768), id ASC
+                ORDER BY {vector} <=> {query_vector}, id ASC
                 LIMIT %s OFFSET %s
-            """).format(where_clause=sql.SQL(where_clause))
+            """).format(
+                where_clause=sql.SQL(where_clause),
+                vector=sql.SQL(VECTOR_SQL),
+                query_vector=sql.SQL(QUERY_VECTOR_SQL),
+            )
             cursor.execute(
                 query_sql,
                 [target_image.embedding]

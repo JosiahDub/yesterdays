@@ -33,7 +33,7 @@
 
         <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
             <h1 class="mb-0"><i class="fas fa-clone me-3"></i>Review Duplicate Pair</h1>
-            <span class="badge fs-6 {% if distance < 0.02 %}bg-success{% elif distance < 0.04 %}bg-warning text-dark{% else %}bg-danger{% endif %}">
+            <span class="badge fs-6 {% if distance < distance_high %}bg-success{% elif distance < distance_medium %}bg-warning text-dark{% else %}bg-danger{% endif %}">
                 distance {{ distance|floatformat:4 }}
             </span>
             {% if same_collection %}

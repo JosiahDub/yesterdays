@@ -43,7 +43,7 @@
                 <div class="card-body">
                     <div class="row align-items-center g-3">
                         <div class="col-12 col-md-auto text-center dupe-dist">
-                            <span class="badge fs-6 {% if pair.distance < 0.02 %}bg-success{% elif pair.distance < 0.04 %}bg-warning text-dark{% else %}bg-danger{% endif %}">
+                            <span class="badge fs-6 {% if pair.distance < distance_high %}bg-success{% elif pair.distance < distance_medium %}bg-warning text-dark{% else %}bg-danger{% endif %}">
                                 {{ pair.distance|floatformat:4 }}
                             </span>
                             {% if pair.image_a.collection_id == pair.image_b.collection_id %}

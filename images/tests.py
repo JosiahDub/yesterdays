@@ -1,17 +1,24 @@
 import datetime
 import json
 import re
+import tempfile
 import threading
 from contextlib import contextmanager
-from io import BytesIO
+from io import BytesIO, StringIO
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+import numpy as np
+from django.conf import settings
 
 from django.contrib.auth.models import User
 from django.contrib.gis.geos import Point, Polygon
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db import IntegrityError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.db.models import F, ProtectedError
@@ -31,7 +38,7 @@ from PIL import Image as PILImage
 from images.management.commands.detect_addresses import (
     Command as DetectAddressesCommand,
 )
-from images import policies
+from images import clip_client, policies
 from images.admin import SiteSettingsAdminForm
 from images.models import (
     AerialGeoreference,
@@ -50,6 +57,8 @@ from images.models import (
     SubjectMapping,
 )
 from images.tasks import (
+    embed_image_url,
+    generate_embeddings_batch,
     process_image,
     reconcile_collection_region_stats,
     reconcile_collection_stats,
@@ -2625,6 +2634,271 @@ class ProcessImageGenerationGuardTests(TestCase):
         tiles.assert_called_once_with(image.id)
 
 
+@override_settings(CLIP_SERVICE_URL="http://clip.test")
+class EmbeddingPipelineTests(TestCase):
+    """Embeddings are of the displayed image (the transformed copy when there
+    is one), sent whole, and only from the configured model."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.source = Source.objects.create(
+            name="Src", slug="src", url="https://example.com", description=""
+        )
+        cls.collection = Collection.objects.create(
+            source=cls.source, name="Col", slug="col", url="https://example.com"
+        )
+
+    def make_image(self, **kwargs):
+        with patch("images.tasks.process_image.apply_async"):
+            return Image.objects.create(
+                collection=self.collection,
+                title="Test",
+                permalink="https://img.example.com/test.jpg",
+                **kwargs,
+            )
+
+    def vector(self, hot=0):
+        v = [0.0] * settings.EMBEDDING_DIMENSION
+        v[hot] = 1.0
+        return v
+
+    def run_process_image(self, image, **kwargs):
+        """Run process_image with downloads and uploads stubbed; returns the
+        mocked generate_embeddings_batch.delay."""
+        uploader = patch("images.tasks.R2Uploader").start()
+        uploader.return_value.upload_file_content.side_effect = (
+            lambda content, key, **kw: f"https://cdn.test/{key}"
+        )
+        patch(
+            "images.tasks.download_image",
+            return_value=PILImage.new("RGB", (600, 400)),
+        ).start()
+        patch("images.tasks.generate_iiif_tiles.delay").start()
+        reembed = patch("images.tasks.generate_embeddings_batch.delay").start()
+        try:
+            process_image(image.id, **kwargs)
+        finally:
+            patch.stopall()
+        return reembed
+
+    def test_new_transform_queues_reembed(self):
+        image = self.make_image(rotation=90, embedding=self.vector())
+        reembed = self.run_process_image(image)
+        reembed.assert_called_once_with(force=True, image_ids=[image.id])
+
+    def test_removed_transform_queues_reembed(self):
+        image = self.make_image(
+            embedding=self.vector(),
+            thumbnail="https://cdn.test/thumb.webp",
+            transformed_permalink="https://cdn.test/transformed.webp",
+        )
+        reembed = self.run_process_image(image)
+        reembed.assert_called_once_with(force=True, image_ids=[image.id])
+
+    def test_no_reembed_without_existing_embedding(self):
+        image = self.make_image(rotation=90)
+        self.run_process_image(image).assert_not_called()
+
+    def test_no_reembed_when_only_regenerating_assets(self):
+        image = self.make_image(
+            embedding=self.vector(), thumbnail="https://cdn.test/thumb.webp"
+        )
+        Image.objects.filter(pk=image.id).update(asset_generation=1)
+        self.run_process_image(image, force=True).assert_not_called()
+
+    def test_batch_embeds_displayed_version(self):
+        image = self.make_image(
+            rotation=90, transformed_permalink="https://cdn.test/transformed.webp"
+        )
+        with (
+            patch("images.tasks.embed_image_url", return_value=self.vector(3)) as embed,
+            patch("images.tasks.generate_embeddings_batch.delay") as requeue,
+        ):
+            generate_embeddings_batch(image_ids=[image.id])
+        embed.assert_called_once_with("https://cdn.test/transformed.webp")
+        requeue.assert_called_once()
+        image.refresh_from_db()
+        self.assertEqual(image.embedding, self.vector(3))
+
+    def test_batch_stops_on_model_mismatch(self):
+        image = self.make_image()
+        with (
+            patch(
+                "images.tasks.embed_image_url",
+                side_effect=clip_client.ClipServiceMismatch("wrong model"),
+            ),
+            patch("images.tasks.generate_embeddings_batch.delay") as requeue,
+        ):
+            generate_embeddings_batch(image_ids=[image.id])
+        requeue.assert_not_called()
+
+    def test_embed_image_url_sends_whole_frame(self):
+        buffer = BytesIO()
+        PILImage.new("RGB", (2000, 500)).save(buffer, format="PNG")
+        response = Mock(
+            content=buffer.getvalue(), headers={"content-type": "image/png"}
+        )
+        with (
+            patch("images.tasks.requests.get", return_value=response),
+            patch(
+                "images.tasks.clip_client.get_image_embedding",
+                return_value=self.vector(),
+            ) as encode,
+        ):
+            embed_image_url("https://img.example.com/wide.png")
+        sent = PILImage.open(BytesIO(encode.call_args.args[0]))
+        self.assertEqual(sent.size, (1024, 256))
+
+    def service_response(self, model, dim):
+        return Mock(
+            json=Mock(
+                return_value={"embedding": [0.0] * dim, "model": model, "dim": dim}
+            ),
+            raise_for_status=Mock(),
+        )
+
+    def test_client_accepts_configured_model(self):
+        response = self.service_response(
+            settings.EMBEDDING_MODEL_ID, settings.EMBEDDING_DIMENSION
+        )
+        with patch.object(clip_client._session, "post", return_value=response):
+            embedding = clip_client.get_text_embedding("a street")
+        self.assertEqual(len(embedding), settings.EMBEDDING_DIMENSION)
+
+    def test_client_rejects_other_model(self):
+        for model, dim in (
+            ("openai/clip-vit-large-patch14-336", 768),
+            ("openai/clip-vit-large-patch14-336", settings.EMBEDDING_DIMENSION),
+        ):
+            response = self.service_response(model, dim)
+            with (
+                self.subTest(model=model, dim=dim),
+                patch.object(clip_client._session, "post", return_value=response),
+                self.assertRaises(clip_client.ClipServiceMismatch),
+            ):
+                clip_client.get_image_embedding(b"png bytes")
+
+
+class EmbeddingImportExportCommandTests(TestCase):
+    """import_embeddings fills only empty rows, and only from the configured
+    model; export_embeddings writes the same format back out."""
+
+    @classmethod
+    def setUpTestData(cls):
+        source = Source.objects.create(
+            name="Src", slug="src", url="https://example.com", description=""
+        )
+        collection = Collection.objects.create(
+            source=source, name="Col", slug="col", url="https://example.com"
+        )
+        with patch("images.tasks.process_image.apply_async"):
+            cls.empty, cls.embedded = (
+                Image.objects.create(
+                    collection=collection,
+                    title=title,
+                    permalink=f"https://img.example.com/{title}.jpg",
+                )
+                for title in ("empty", "embedded")
+            )
+        cls.existing = [0.0] * settings.EMBEDDING_DIMENSION
+        cls.existing[0] = 1.0
+        Image.objects.filter(pk=cls.embedded.pk).update(embedding=cls.existing)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+
+    def write_file(self, ids, vectors, model_id=None, urls=None):
+        path = self.tmp / "seed.npz"
+        meta = {"model_id": model_id or settings.EMBEDDING_MODEL_ID}
+        extra = {"urls": np.array(urls)} if urls is not None else {}
+        np.savez(
+            path,
+            ids=np.array(ids, dtype=np.int64),
+            vectors=np.asarray(vectors, dtype=np.float16),
+            meta=np.array(json.dumps(meta)),
+            **extra,
+        )
+        return str(path)
+
+    def unit_vectors(self, n, dim=None):
+        rng = np.random.default_rng(0)
+        v = rng.normal(size=(n, dim or settings.EMBEDDING_DIMENSION))
+        return v / np.linalg.norm(v, axis=1, keepdims=True)
+
+    def test_import_fills_only_empty_rows(self):
+        vectors = self.unit_vectors(3)
+        unknown_id = self.embedded.pk + 1000
+        path = self.write_file([self.empty.pk, self.embedded.pk, unknown_id], vectors)
+        out = StringIO()
+        call_command("import_embeddings", path, stdout=out)
+
+        self.empty.refresh_from_db()
+        self.embedded.refresh_from_db()
+        imported = np.array(self.empty.embedding)
+        self.assertAlmostEqual(float(np.linalg.norm(imported)), 1.0, places=6)
+        self.assertGreater(float(imported @ vectors[0]), 0.9999)
+        self.assertEqual(self.embedded.embedding, self.existing)
+        self.assertIn(
+            "Imported 1 embeddings; skipped 1 images that already had one, "
+            "0 whose displayed image differs from the file's and 1 ids with no image",
+            out.getvalue(),
+        )
+
+    def test_import_skips_images_whose_displayed_url_differs(self):
+        # The same id names another image here (a diverged dev/staging copy),
+        # or the image has been re-transformed since the vectors were made.
+        vectors = self.unit_vectors(1)
+        path = self.write_file(
+            [self.empty.pk], vectors, urls=["https://img.example.com/other.jpg"]
+        )
+        out = StringIO()
+        call_command("import_embeddings", path, stdout=out)
+        self.empty.refresh_from_db()
+        self.assertIsNone(self.empty.embedding)
+        self.assertIn("1 whose displayed image differs", out.getvalue())
+
+        path = self.write_file(
+            [self.empty.pk], vectors, urls=[self.empty.display_permalink]
+        )
+        call_command("import_embeddings", path, stdout=StringIO())
+        self.empty.refresh_from_db()
+        self.assertIsNotNone(self.empty.embedding)
+
+    def test_import_rejects_other_model(self):
+        path = self.write_file(
+            [self.empty.pk],
+            self.unit_vectors(1),
+            model_id="openai/clip-vit-large-patch14-336",
+        )
+        with self.assertRaisesMessage(CommandError, "expected"):
+            call_command("import_embeddings", path, stdout=StringIO())
+        self.empty.refresh_from_db()
+        self.assertIsNone(self.empty.embedding)
+
+    def test_import_rejects_wrong_dimension(self):
+        path = self.write_file([self.empty.pk], self.unit_vectors(1, dim=768))
+        with self.assertRaisesMessage(CommandError, "columns"):
+            call_command("import_embeddings", path, stdout=StringIO())
+
+    def test_import_rejects_non_unit_vectors(self):
+        path = self.write_file([self.empty.pk], 2 * self.unit_vectors(1))
+        with self.assertRaisesMessage(CommandError, "unit length"):
+            call_command("import_embeddings", path, stdout=StringIO())
+
+    def test_export_round_trips(self):
+        path = self.tmp / "export.npz"
+        call_command("export_embeddings", str(path), stdout=StringIO())
+        with np.load(path, allow_pickle=False) as data:
+            meta = json.loads(str(data["meta"]))
+            self.assertEqual(data["ids"].tolist(), [self.embedded.pk])
+            self.assertEqual(data["urls"].tolist(), [self.embedded.display_permalink])
+            self.assertEqual(data["vectors"].shape, (1, settings.EMBEDDING_DIMENSION))
+        self.assertEqual(meta["model_id"], settings.EMBEDDING_MODEL_ID)
+        self.assertEqual(meta["dim"], settings.EMBEDDING_DIMENSION)
+
+
 class ImageAdminRegenerationActionTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -2820,7 +3094,7 @@ class SearchGeoreferenceFilterTests(TestCase):
             permalink=f"https://img.example.com/{title}.jpg",
             description=f"A photograph of the {cls.TOKEN} district.",
             aerial=aerial,
-            embedding=[0.1] * 768,
+            embedding=[0.1] * settings.EMBEDDING_DIMENSION,
         )
         # Pick up the signal-computed is_searchable flag.
         img.refresh_from_db()
@@ -2856,7 +3130,7 @@ class SearchGeoreferenceFilterTests(TestCase):
     def _semantic_search_ids(self, **params):
         with patch(
             "images.views.search.semantic._get_text_embedding",
-            return_value=[0.1] * 768,
+            return_value=[0.1] * settings.EMBEDDING_DIMENSION,
         ):
             resp = self.client.get("/api/v1/search/", {"q": self.TOKEN, **params})
         self.assertEqual(resp.status_code, 200)
@@ -2980,7 +3254,7 @@ class SearchRegionFilterTests(TestCase):
             permalink=f"https://img.example.com/{title}.jpg",
             description=f"A photograph of the {cls.TOKEN} district.",
             region=region,
-            embedding=[0.1] * 768,
+            embedding=[0.1] * settings.EMBEDDING_DIMENSION,
         )
         # Pick up the signal-computed is_searchable flag.
         img.refresh_from_db()
@@ -3041,7 +3315,7 @@ class SearchRegionFilterTests(TestCase):
     def _semantic_search_ids(self, **params):
         with patch(
             "images.views.search.semantic._get_text_embedding",
-            return_value=[0.1] * 768,
+            return_value=[0.1] * settings.EMBEDDING_DIMENSION,
         ):
             resp = self.client.get("/api/v1/search/", {"q": self.TOKEN, **params})
         self.assertEqual(resp.status_code, 200)
@@ -3078,7 +3352,7 @@ class SearchRegionFilterTests(TestCase):
         )
         with patch(
             "images.views.search.reverse_image._get_image_embedding",
-            return_value=[0.1] * 768,
+            return_value=[0.1] * settings.EMBEDDING_DIMENSION,
         ):
             resp = self.client.post("/api/v1/search/reverse/", {"image": upload})
         self.assertEqual(resp.status_code, 200)
