@@ -752,7 +752,7 @@
                             {% for duplicate in image.duplicates.all %}
                             <div class="col-lg-3 col-md-4 col-sm-6">
                                 <div class="card h-100 shadow-sm">
-                                    <img src="{{ duplicate.display_permalink }}"
+                                    <img src="{% if duplicate.thumbnail %}{{ duplicate.thumbnail }}{% else %}{{ duplicate.display_permalink }}{% endif %}"
                                          alt="{% if duplicate.title %}{{ duplicate.title }}{% else %}Duplicate Image #{{ duplicate.id }}{% endif %}"
                                          class="card-img-top"
                                          style="height: 200px; object-fit: cover; cursor: pointer;"
