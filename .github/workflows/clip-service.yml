@@ -33,7 +33,7 @@ jobs:
 
       # Log in before the build so --cache-to can push cache layers to ghcr.
       - name: Log in to registry
-        uses: redhat-actions/podman-login@v1
+        uses: redhat-actions/podman-login@v2
         with:
           registry: ${{ env.IMAGE_REGISTRY }}
           username: ${{ env.REGISTRY_USER }}
@@ -44,7 +44,7 @@ jobs:
       # changes; code-only pushes ship a few MB.
       - name: Buildah Action
         id: build_image
-        uses: redhat-actions/buildah-build@v2
+        uses: redhat-actions/buildah-build@v3
         with:
           image: ${{ env.IMAGE_NAME }}
           tags: ${{ steps.vars.outputs.sha_short }} ${{ github.ref_name }}
@@ -52,6 +52,9 @@ jobs:
           containerfiles: |
             ./services/clip/Containerfile
           layers: true
+          # v3 defaults to squash: true, which would collapse everything into one
+          # layer and defeat the per-layer reuse above.
+          squash: false
           build-args: |
             MODEL_BUNDLE_URL=${{ env.MODEL_BUNDLE_URL }}
             MODEL_BUNDLE_SHA256=${{ env.MODEL_BUNDLE_SHA256 }}
@@ -62,7 +65,7 @@ jobs:
 
       - name: Push Image
         id: push
-        uses: redhat-actions/push-to-registry@v2
+        uses: redhat-actions/push-to-registry@v3
         with:
           image: ${{ steps.build_image.outputs.image }}
           tags: ${{ steps.build_image.outputs.tags }}
