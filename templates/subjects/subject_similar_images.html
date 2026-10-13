@@ -62,6 +62,16 @@
 
         <!-- Image Grid with bulk selection and Load More support -->
         <div class="col-12" x-data="similarImagesGrid()">
+            {% if region_fallback %}
+                <div class="alert alert-info" role="status">
+                    No similar images in your selected region. Showing similar images from all regions.
+                </div>
+            {% elif browse_region and region_image_count < total_image_count %}
+                <div class="alert alert-secondary" role="status">
+                    Showing {{ region_image_count }} of {{ total_image_count }} image{{ total_image_count|pluralize }} in {{ browse_region }}.
+                </div>
+            {% endif %}
+
             {% if images %}
                 <div class="mb-3">
                     {% include 'images/partials/grid_toolbar.html' %}

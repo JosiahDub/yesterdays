@@ -92,6 +92,12 @@ EMBEDDING_DIMENSION = 1024
 # this many candidates per query). pgvector hard-caps ef_search at 1000.
 HNSW_EF_SEARCH = int(os.getenv("HNSW_EF_SEARCH", "1000"))
 
+# Upper bound on index tuples a pgvector iterative scan (hnsw.iterative_scan)
+# visits while filling a filtered query, e.g. similar images scoped to a
+# region. pgvector's default of 20000 is below the corpus size, which would let
+# the scan give up before reaching a small region's matches.
+HNSW_MAX_SCAN_TUPLES = int(os.getenv("HNSW_MAX_SCAN_TUPLES", "100000"))
+
 # Subject "find similar images" query construction (subjects/similarity.py).
 # Shrinkage strength toward the corpus mean for small collections' means:
 # mu_c = (n * mean_c + n0 * mu_corpus) / (n + n0)

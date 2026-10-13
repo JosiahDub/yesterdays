@@ -1171,10 +1171,34 @@ def find_similar_images_to_subject(request, qid):
         # Get IDs of subject images to exclude from results
         subject_image_ids = list(subject_images.values_list("id", flat=True))
 
+        # Scope results to the navbar region, falling back to all images when
+        # the region has no candidates at all. Decided before the user's
+        # filters (like subject_detail) and on every request, so "Load More"
+        # pages agree with the first one. The query embedding stays global.
+        region = get_current_region(request)
+        region_fallback = False
+        if (
+            region is not None
+            and not Image.objects.filter(is_searchable=True, embedding__isnull=False)
+            .exclude(id__in=subject_image_ids)
+            .in_region(region)
+            .exists()
+        ):
+            region = None
+            region_fallback = True
+
         with transaction.atomic(), connection.cursor() as cursor:
             # Raise pgvector's HNSW search depth from its default of 40.
             # Scoped to this transaction via SET LOCAL.
             cursor.execute("SET LOCAL hnsw.ef_search = %s", [settings.HNSW_EF_SEARCH])
+            # Keep scanning the index until enough rows pass the WHERE clause,
+            # in exact distance order. Without this, filters (the region
+            # especially) only post-filter the first ef_search candidates, so
+            # a region whose images all rank beyond them would come back empty.
+            cursor.execute("SET LOCAL hnsw.iterative_scan = strict_order")
+            cursor.execute(
+                "SET LOCAL hnsw.max_scan_tuples = %s", [settings.HNSW_MAX_SCAN_TUPLES]
+            )
 
             # Convert query embedding to PostgreSQL array format
             embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
@@ -1247,20 +1271,46 @@ def find_similar_images_to_subject(request, qid):
                     )
                     where_params.extend(valid_ids)
 
-            where_clause = " AND ".join(where_conditions)
-
-            # Get total count for pagination
-            count_sql = sql.SQL("""
+            count_template = """
                 SELECT COUNT(id)
                 FROM images_image
                 WHERE {where_clause}
                 AND is_searchable = true
-            """).format(where_clause=sql.SQL(where_clause))
-            cursor.execute(count_sql, where_params)
-            total_count = cursor.fetchone()[0]
-            # HNSW can only rank ef_search candidates per query, so deeper
-            # results aren't reachable even if more matching rows exist.
-            total_count = min(total_count, settings.HNSW_EF_SEARCH)
+            """
+
+            # Size of the same pool across every region, for the
+            # "Showing X of Y images in <region>" banner
+            total_image_count = None
+            if region is not None and not is_ajax:
+                cursor.execute(
+                    sql.SQL(count_template).format(
+                        where_clause=sql.SQL(" AND ".join(where_conditions))
+                    ),
+                    where_params,
+                )
+                total_image_count = cursor.fetchone()[0]
+
+            # Same resolution as ImageQuerySet.in_region. Appended last
+            # because where_params is positional: the page query splices it
+            # between the two embedding parameters.
+            if region is not None:
+                where_conditions.append(
+                    Image.EFFECTIVE_REGION_SQL.format(alias="images_image.")
+                    + " = ANY(%s)"
+                )
+                where_params.append(region.self_and_descendant_ids())
+
+            where_clause = " AND ".join(where_conditions)
+
+            # Get total count for pagination
+            cursor.execute(
+                sql.SQL(count_template).format(where_clause=sql.SQL(where_clause)),
+                where_params,
+            )
+            region_image_count = cursor.fetchone()[0]
+            # Pagination stops at ef_search results, matching the other
+            # similarity views.
+            total_count = min(region_image_count, settings.HNSW_EF_SEARCH)
 
             # SQL-level pagination - only fetch the IDs we need for this page
             query_sql = sql.SQL("""
@@ -1341,6 +1391,10 @@ def find_similar_images_to_subject(request, qid):
             "total_similar_count": total_count,
             "has_more": has_more,
             "per_page": per_page,
+            "browse_region": region,
+            "region_fallback": region_fallback,
+            "region_image_count": region_image_count,
+            "total_image_count": total_image_count,
         }
 
         return render(request, "subjects/subject_similar_images.html", context)
