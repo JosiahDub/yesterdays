@@ -7,8 +7,11 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
 
 from ..models import (
+    AerialGeoreference,
     Album,
     AlbumImage,
+    Georeference,
+    Image,
 )
 from ..policies import (
     album_contains_private_images,
@@ -318,20 +321,50 @@ def album_detail(request, album_id):
     if not album.public and (not request.user.is_authenticated or request.user != user):
         raise Http404("Album not found")
 
-    # Get images in album order
-    album_images = album.album_images.select_related("image").order_by("order")
+    album_images = Image.objects.filter(album_references__album=album)
 
-    # Extract the actual Image objects from AlbumImage objects
-    images = [ai.image for ai in album_images]
+    # Count georeferenced images in the database, mirroring
+    # Image.is_georeferenced: aerial images need a polygon georeference,
+    # everything else a point one.
+    counts = album_images.annotate(
+        has_point=models.Exists(
+            Georeference.objects.filter(image=models.OuterRef("pk"))
+        ),
+        has_aerial=models.Exists(
+            AerialGeoreference.objects.filter(image=models.OuterRef("pk"))
+        ),
+    ).aggregate(
+        total=models.Count("pk"),
+        georeferenced=models.Count(
+            "pk",
+            filter=models.Q(aerial=False, has_point=True)
+            | models.Q(aerial=True, has_aerial=True),
+        ),
+    )
+    georeferenced_images = counts["georeferenced"]
+    pending_images = counts["total"] - georeferenced_images
 
-    # Calculate pending images count for the georeference button
-    pending_images = sum(1 for image in images if not image.is_georeferenced)
-
-    # Calculate georeferenced images count for map display
-    georeferenced_images = sum(1 for image in images if image.is_georeferenced)
+    # Only the current page is loaded. The card template checks
+    # is_georeferenced several times per image; prefetching the georeference
+    # IDs lets those .exists() calls read the prefetch cache instead of
+    # querying. The embedding and search vector are never displayed.
+    page_images = (
+        album_images.select_related("collection__source")
+        .defer("embedding", "search_vector")
+        .prefetch_related(
+            models.Prefetch(
+                "georeferences", queryset=Georeference.objects.only("id", "image_id")
+            ),
+            models.Prefetch(
+                "aerial_georeferences",
+                queryset=AerialGeoreference.objects.only("id", "image_id"),
+            ),
+        )
+        .order_by("album_references__order", "id")
+    )
 
     # Paginate images for browsing
-    paginator = Paginator(images, 24)  # 24 images per page for grid layout
+    paginator = Paginator(page_images, 24)  # 24 images per page for grid layout
     page_number = request.GET.get("page")
     page_obj = paginator.get_page(page_number)
 

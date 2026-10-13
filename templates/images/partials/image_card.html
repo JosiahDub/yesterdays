@@ -38,15 +38,11 @@
                             <span class="badge bg-secondary position-absolute top-0 end-0 m-2">
                                 <i class="fas fa-ban"></i> Skip
                             </span>
-                        {% elif image.aerial and image.get_aerial_georeference %}
+                        {% elif image.is_georeferenced %}
                             <span class="badge bg-success position-absolute top-0 end-0 m-2">
                                 <i class="fas fa-map-marker-alt"></i> Georeferenced
                             </span>
-                        {% elif not image.aerial and image.is_georeferenced %}
-                            <span class="badge bg-success position-absolute top-0 end-0 m-2">
-                                <i class="fas fa-map-marker-alt"></i> Georeferenced
-                            </span>
-                        {% elif image.duplicate_of %}
+                        {% elif image.duplicate_of_id %}
                             <span class="badge bg-secondary position-absolute top-0 end-0 m-2">
                                 <i class="fas fa-copy"></i> Duplicate
                             </span>
@@ -163,15 +159,11 @@
                     <!-- Action Button -->
                     {% if image.will_not_georef %}
                         <!-- Skip badge shown, no action button -->
-                    {% elif image.aerial and image.get_aerial_georeference %}
+                    {% elif image.is_georeferenced %}
                         <a href="{% url 'images:image_detail' image.id %}" class="btn btn-primary btn-sm">
                             <i class="fas fa-eye me-1"></i>View
                         </a>
-                    {% elif not image.aerial and image.is_georeferenced %}
-                        <a href="{% url 'images:image_detail' image.id %}" class="btn btn-primary btn-sm">
-                            <i class="fas fa-eye me-1"></i>View
-                        </a>
-                    {% elif image.duplicate_of %}
+                    {% elif image.duplicate_of_id %}
                         <a href="{% url 'images:image_detail' image.id %}" class="btn btn-outline-primary btn-sm">
                             <i class="fas fa-eye me-1"></i>View
                         </a>
