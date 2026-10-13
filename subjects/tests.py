@@ -1548,6 +1548,7 @@ class BrowseSubjectsTests(TestCase):
             {self.building.pk, self.landmark.pk},
         )
         self.assertEqual(response.context["overall_stats"]["total_subjects"], 2)
+        self.assertEqual(response.context["overall_stats"]["total_images"], 2)
 
 
 class BrowseSubjectsRegionTests(TestCase):

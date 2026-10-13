@@ -14,6 +14,7 @@ from django.db.models import (
     OuterRef,
     Q,
     Subquery,
+    Sum,
     Value,
     When,
 )
@@ -682,6 +683,19 @@ def _browse_subject_queryset(region=None):
     return (
         Subject.objects.all()
         .select_related("wikidata_item", "representative_image")
+        # Only what the cards and og: tags read; a deferred field read in the
+        # template costs a query per subject. Notably skips the representative
+        # image's embedding, which would otherwise be loaded for every row.
+        .only(
+            "title",
+            "slug",
+            "wikidata_item__wikidata_id",
+            "wikidata_item__description",
+            "wikidata_item__inception",
+            "wikidata_item__demolished",
+            "representative_image__title",
+            "representative_image__thumbnail",
+        )
         .annotate(**_public_image_count_annotations(region))
         # A city (or other broad subject) that is an ancestor of a more
         # specific Subject is represented by its descendants in this grid.
@@ -713,22 +727,20 @@ def browse_subjects(request):
 
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
 
-    # Calculate overall statistics before filtering by search query
+    # Calculate overall statistics before filtering by search query. Aggregate
+    # in the database rather than materializing every subject (and its
+    # representative image) just to count them.
     if not is_ajax:
-        all_subjects = list(subjects)
-        total_subjects = len(all_subjects)
-        total_images = sum(s.total_images for s in all_subjects)
-        total_georeferenced = sum(s.georeferenced_images for s in all_subjects)
-
+        stats = subjects.aggregate(
+            total_subjects=Count("pk"),
+            # Must not reuse the "total_images" annotation's name: Django prunes
+            # the shadowed annotation from the inner query, and the SUM fails
+            # with 'column "total_images" does not exist'.
+            image_total=Sum("total_images", default=0),
+        )
         overall_stats = {
-            "total_subjects": total_subjects,
-            "total_images": total_images,
-            "total_georeferenced": total_georeferenced,
-            "georeferenced_percentage": round(
-                (total_georeferenced / total_images * 100), 1
-            )
-            if total_images > 0
-            else 0,
+            "total_subjects": stats["total_subjects"],
+            "total_images": stats["image_total"],
         }
 
     # Apply category filter via the SubjectAncestor materialization. If the
