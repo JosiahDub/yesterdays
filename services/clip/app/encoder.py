@@ -1,6 +1,7 @@
 import html
 import json
 import threading
+import time
 from io import BytesIO
 from pathlib import Path
 
@@ -10,6 +11,8 @@ import openvino as ov
 import regex
 from PIL import Image
 from transformers import CLIPTokenizerFast
+
+from .metrics import INFLIGHT, PHASE_DURATION, TEXT_TOKENS, TEXT_TRUNCATED
 
 # Bundles exported before metadata.json grew "preprocess"/"tokenizer" keys
 # were OpenAI CLIP: shortest-edge bicubic resize + center crop, CLIP stats,
@@ -113,38 +116,62 @@ class ClipEncoder:
         ids = []
         for word in words:
             ids.extend([special_ids[word]] if word in special_ids else next(encoded))
+        context_length = self.meta["context_length"]
+        TEXT_TOKENS.observe(len(ids))
+        if len(ids) > context_length - 2:
+            TEXT_TRUNCATED.inc()
         return build_token_array(
             ids,
-            self.meta["context_length"],
+            context_length,
             self.special["sot"],
             self.special["eot"],
             self.special["pad"],
         )
 
     def encode_text(self, text):
-        input_ids = self.tokenize(text)
-        with self._text_lock:
-            result = self._text_req.infer({0: input_ids})
-        return _normalize(next(iter(result.values()))[0])
+        with INFLIGHT.labels("text").track_inprogress():
+            with PHASE_DURATION.labels("text", "tokenize").time():
+                input_ids = self.tokenize(text)
+            return self._infer("text", self._text_lock, self._text_req, input_ids)
 
     def encode_image(self, data):
-        with Image.open(BytesIO(data)) as img:
-            # Let libjpeg decode at a reduced DCT scale (still >= the input
-            # size on both sides): far cheaper than a full 1920px decode, and
-            # how the canonical corpus vectors were computed.
-            size = self.meta["image_size"]
-            img.draft("RGB", (size, size))
-            return self.encode_pil(img.convert("RGB"))
+        with INFLIGHT.labels("vision").track_inprogress():
+            with (
+                PHASE_DURATION.labels("vision", "decode").time(),
+                Image.open(BytesIO(data)) as img,
+            ):
+                # Let libjpeg decode at a reduced DCT scale (still >= the input
+                # size on both sides): far cheaper than a full 1920px decode,
+                # and how the canonical corpus vectors were computed.
+                size = self.meta["image_size"]
+                img.draft("RGB", (size, size))
+                rgb = img.convert("RGB")
+            return self.encode_pil(rgb)
 
     def encode_pil(self, img):
-        pixel_values = preprocess_image(img, self.meta["image_size"], self.preprocess)
-        with self._vision_lock:
-            result = self._vision_req.infer({0: pixel_values})
+        with PHASE_DURATION.labels("vision", "preprocess").time():
+            pixel_values = preprocess_image(
+                img, self.meta["image_size"], self.preprocess
+            )
+        return self._infer("vision", self._vision_lock, self._vision_req, pixel_values)
+
+    def _infer(self, tower, lock, request, inputs):
+        """Run one tower's infer request, timing the wait for its lock separately."""
+        queued = time.perf_counter()
+        with lock:
+            started = time.perf_counter()
+            result = request.infer({0: inputs})
+        PHASE_DURATION.labels(tower, "lock_wait").observe(started - queued)
+        PHASE_DURATION.labels(tower, "infer").observe(time.perf_counter() - started)
         return _normalize(next(iter(result.values()))[0])
 
     def warmup(self):
-        self.encode_text("warmup")
-        self.encode_pil(Image.new("RGB", (64, 64)))
+        # Straight to the infer requests: the slow first inference would
+        # otherwise land in the latency histograms on every restart.
+        self._text_req.infer({0: self.tokenize("warmup")})
+        image = Image.new("RGB", (64, 64))
+        size = self.meta["image_size"]
+        self._vision_req.infer({0: preprocess_image(image, size, self.preprocess)})
 
 
 def bundle_specs(meta):

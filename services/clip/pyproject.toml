@@ -11,6 +11,7 @@ dependencies = [
     "numpy>=2.1",
     "openvino>=2025.1",
     "pillow>=11.0",
+    "prometheus-client>=0.21",
     # open_clip's pre-tokenizer pattern needs \p{L}/\p{N} classes.
     "regex>=2024.11.6",
     # Only CLIPTokenizerFast (BPE) is used. <5 because v5 reworks the
@@ -31,6 +32,8 @@ export = [
     "torchvision>=0.21",
 ]
 dev = [
+    # FastAPI's TestClient.
+    "httpx2>=2.13",
     "pytest>=8.3",
 ]
 

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
+import requests
 from django.conf import settings
 
 from django.contrib.auth.models import User
@@ -34,6 +35,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.text import slugify
 from PIL import Image as PILImage
+from prometheus_client import REGISTRY
 
 from images.management.commands.detect_addresses import (
     Command as DetectAddressesCommand,
@@ -2777,6 +2779,52 @@ class EmbeddingPipelineTests(TestCase):
                 self.assertRaises(clip_client.ClipServiceMismatch),
             ):
                 clip_client.get_image_embedding(b"png bytes")
+
+    def client_calls(self, operation, outcome):
+        return (
+            REGISTRY.get_sample_value(
+                "clip_client_requests_total",
+                {"operation": operation, "outcome": outcome},
+            )
+            or 0
+        )
+
+    def test_client_counts_outcomes(self):
+        ok = self.service_response(
+            settings.EMBEDDING_MODEL_ID, settings.EMBEDDING_DIMENSION
+        )
+        unready = Mock(
+            raise_for_status=Mock(
+                side_effect=requests.HTTPError(response=Mock(status_code=503))
+            )
+        )
+        cases = (
+            ("ok", {"return_value": ok}, None),
+            ("timeout", {"side_effect": requests.ConnectTimeout()}, requests.Timeout),
+            (
+                "connection_error",
+                {"side_effect": requests.ConnectionError()},
+                requests.ConnectionError,
+            ),
+            ("http_503", {"return_value": unready}, requests.HTTPError),
+            (
+                "mismatch",
+                {"return_value": self.service_response("other", 768)},
+                clip_client.ClipServiceMismatch,
+            ),
+        )
+        for outcome, post, raises in cases:
+            with (
+                self.subTest(outcome=outcome),
+                patch.object(clip_client._session, "post", **post),
+            ):
+                before = self.client_calls("text", outcome)
+                if raises:
+                    with self.assertRaises(raises):
+                        clip_client.get_text_embedding("a street")
+                else:
+                    clip_client.get_text_embedding("a street")
+                self.assertEqual(self.client_calls("text", outcome), before + 1)
 
 
 class EmbeddingImportExportCommandTests(TestCase):
