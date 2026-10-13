@@ -5005,3 +5005,123 @@ class HomeSubjectsOrderAdminFormTests(TestCase):
         self.assertEqual(
             form.cleaned_data["home_subjects_order"], [self.station.subject_id]
         )
+
+
+class SimilarImagesRegionTests(TestCase):
+    """The image "similar images" page is scoped to the navbar region."""
+
+    @classmethod
+    def setUpTestData(cls):
+        virginia_item, richmond_item, maryland_item, empty_item = (
+            WikidataItem.objects.bulk_create(
+                [
+                    WikidataItem(wikidata_id="Q4201", title="Virginia"),
+                    WikidataItem(wikidata_id="Q4202", title="Richmond"),
+                    WikidataItem(wikidata_id="Q4203", title="Maryland"),
+                    WikidataItem(wikidata_id="Q4204", title="Empty Region"),
+                ]
+            )
+        )
+        cls.virginia = make_region(
+            short_name="Virginia", slug="virginia", wikidata_item=virginia_item
+        )
+        richmond = make_region(
+            short_name="Richmond", slug="richmond", wikidata_item=richmond_item
+        )
+        maryland = make_region(
+            short_name="Maryland", slug="maryland", wikidata_item=maryland_item
+        )
+        make_region(short_name="Empty Region", slug="empty", wikidata_item=empty_item)
+        RegionAncestor.objects.create(region=richmond, ancestor=virginia_item)
+
+        source = Source.objects.create(
+            name="Src", slug="src", url="https://example.com", description=""
+        )
+        cls.collection = Collection.objects.create(
+            source=source, name="Coll", slug="coll", url="https://example.com"
+        )
+
+        # The target image sits in Maryland; its own region doesn't matter.
+        query = cls._unit(20)
+        cls.target = cls._image("Target", query, maryland)
+
+        # Distance from the target grows with the noise weight. The Maryland
+        # candidates rank closest, so a region filter that only post-filtered
+        # the nearest neighbors would favor them.
+        cls.maryland_near = cls._near("Maryland near", query, 0.1, 21, maryland)
+        cls.maryland_mid = cls._near("Maryland mid", query, 0.2, 22, maryland)
+        cls.virginia_image = cls._near("Virginia", query, 0.5, 23, cls.virginia)
+        cls.richmond_image = cls._near("Richmond", query, 1.0, 24, richmond)
+
+        cls.url = reverse("images:find_similar_images", args=[cls.target.pk])
+
+    @staticmethod
+    def _unit(seed):
+        v = np.random.default_rng(seed).normal(size=settings.EMBEDDING_DIMENSION)
+        return v / np.linalg.norm(v)
+
+    @classmethod
+    def _image(cls, title, embedding, region):
+        return Image.objects.create(
+            collection=cls.collection,
+            title=title,
+            permalink=f"https://example.com/{title}.jpg",
+            region=region,
+            embedding=list(embedding),
+        )
+
+    @classmethod
+    def _near(cls, title, query, weight, seed, region):
+        v = query + weight * cls._unit(seed)
+        return cls._image(title, v / np.linalg.norm(v), region)
+
+    def _result_ids(self, response):
+        return [image.pk for image in response.context["images"]]
+
+    def test_results_are_limited_to_the_region_and_its_descendants(self):
+        self.client.cookies[REGION_COOKIE_NAME] = "Q4201"
+        response = self.client.get(self.url)
+
+        self.assertEqual(
+            self._result_ids(response),
+            [self.virginia_image.pk, self.richmond_image.pk],
+        )
+        self.assertEqual(response.context["browse_region"], self.virginia)
+        self.assertFalse(response.context["region_fallback"])
+        self.assertEqual(response.context["region_image_count"], 2)
+        self.assertEqual(response.context["total_image_count"], 4)
+        self.assertContains(response, "Showing 2 of 4 images in Virginia.")
+
+    def test_load_more_stays_scoped_to_the_region(self):
+        self.client.cookies[REGION_COOKIE_NAME] = "Q4201"
+        response = self.client.get(self.url, HTTP_X_REQUESTED_WITH="XMLHttpRequest")
+
+        self.assertEqual(
+            self._result_ids(response),
+            [self.virginia_image.pk, self.richmond_image.pk],
+        )
+
+    def test_region_without_candidates_falls_back_to_all_images(self):
+        self.client.cookies[REGION_COOKIE_NAME] = "Q4204"
+        response = self.client.get(self.url)
+
+        self.assertEqual(len(self._result_ids(response)), 4)
+        self.assertIsNone(response.context["browse_region"])
+        self.assertTrue(response.context["region_fallback"])
+        self.assertContains(response, "No similar images in your selected region.")
+
+    def test_no_region_returns_every_similar_image(self):
+        response = self.client.get(self.url)
+
+        self.assertEqual(
+            self._result_ids(response),
+            [
+                self.maryland_near.pk,
+                self.maryland_mid.pk,
+                self.virginia_image.pk,
+                self.richmond_image.pk,
+            ],
+        )
+        self.assertIsNone(response.context["browse_region"])
+        self.assertFalse(response.context["region_fallback"])
+        self.assertNotContains(response, "of 4 images in")
