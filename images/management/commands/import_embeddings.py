@@ -33,7 +33,10 @@ from django.db import connection, transaction
 from images.models import Image
 from images.tasks import refresh_collection_embedding_stats
 
-BATCH_SIZE = 1000
+# Rows per transaction. Vectors stay in the file's dtype (float16 for seeds)
+# and are expanded one batch at a time: the import pod has a 500Mi limit, and
+# a whole seed in float32 plus its temporaries doesn't fit beside Django.
+BATCH_SIZE = 500
 # Seed files store float16 vectors, whose norms drift by ~1e-3.
 NORM_TOLERANCE = 1e-2
 
@@ -69,9 +72,9 @@ class Command(BaseCommand):
             try:
                 with np.load(path, allow_pickle=False) as data:
                     ids = data["ids"].astype(np.int64)
-                    vectors = data["vectors"].astype(np.float32)
+                    vectors = data["vectors"]
                     meta = json.loads(str(data["meta"]))
-                    urls = data["urls"].tolist() if "urls" in data else None
+                    urls = data["urls"] if "urls" in data else None
             except (OSError, KeyError, ValueError) as e:
                 raise CommandError(f"Not a readable embeddings file: {e}") from e
 
@@ -84,7 +87,7 @@ class Command(BaseCommand):
             raise CommandError(
                 f"File vectors have shape {vectors.shape}; expected {dimension} columns"
             )
-        if len(ids) != len(vectors):
+        if not len(ids) or len(ids) != len(vectors):
             raise CommandError(f"{len(ids)} ids but {len(vectors)} vectors")
         if urls is None:
             self.stdout.write(
@@ -95,21 +98,27 @@ class Command(BaseCommand):
             )
         elif len(urls) != len(ids):
             raise CommandError(f"{len(ids)} ids but {len(urls)} urls")
-        norms = np.linalg.norm(vectors, axis=1)
+        # Checked for the whole file before anything is written.
+        norms = np.concatenate(
+            [
+                np.linalg.norm(_floats(vectors[start : start + BATCH_SIZE]), axis=1)
+                for start in range(0, len(vectors), BATCH_SIZE)
+            ]
+        )
         if not np.all(np.abs(norms - 1) <= NORM_TOLERANCE):
             raise CommandError(
                 f"Vectors are not unit length (norms {norms.min():.4f}–{norms.max():.4f})"
             )
-        # Undo the float16 rounding so stored vectors are exactly unit length.
-        vectors /= norms[:, None]
 
         totals = dict.fromkeys(("written", "embedded", "mismatched", "unknown"), 0)
         for start in range(0, len(ids), BATCH_SIZE):
             batch = slice(start, start + BATCH_SIZE)
+            # Dividing by the norm undoes float16 rounding, so stored
+            # vectors are exactly unit length.
             counts = self._write_batch(
                 ids[batch].tolist(),
-                vectors[batch].tolist(),
-                urls[batch] if urls is not None else None,
+                (_floats(vectors[batch]) / norms[batch, None]).tolist(),
+                urls[batch].tolist() if urls is not None else None,
             )
             for key, count in counts.items():
                 totals[key] += count
@@ -191,3 +200,7 @@ class Command(BaseCommand):
                     )
                     counts["written"] = cursor.rowcount
         return counts
+
+
+def _floats(rows):
+    return rows.astype(np.float32)

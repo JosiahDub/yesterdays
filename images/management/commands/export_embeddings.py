@@ -59,20 +59,31 @@ class Command(BaseCommand):
         if options["limit"]:
             rows = rows[: options["limit"]]
 
-        ids, vectors, urls = [], [], []
-        for image_id, embedding, transformed, permalink in rows.iterator(
-            chunk_size=2000
-        ):
-            ids.append(image_id)
-            vectors.append(np.asarray(embedding, dtype=np.float32))
-            urls.append(transformed or permalink)
-        if not ids:
+        # Filled in place, in the output dtype: the import pod this runs in
+        # has a 500Mi limit, too little for a list of vectors plus a stacked
+        # copy.
+        count = rows.count()
+        if not count:
             raise CommandError("No images have embeddings; nothing to export.")
-        dimensions = {len(v) for v in vectors}
-        if len(dimensions) != 1:
-            raise CommandError(f"Stored embeddings mix dimensions {sorted(dimensions)}")
+        ids = np.empty(count, dtype=np.int64)
+        matrix, urls = None, []
+        for n, (image_id, embedding, transformed, permalink) in enumerate(
+            rows.iterator(chunk_size=2000)
+        ):
+            if n == count:  # embedded since the count; leave them out
+                break
+            if matrix is None:
+                matrix = np.empty((count, len(embedding)), dtype=options["dtype"])
+            elif len(embedding) != matrix.shape[1]:
+                raise CommandError(
+                    f"Stored embeddings mix dimensions {matrix.shape[1]} and "
+                    f"{len(embedding)} (image {image_id})"
+                )
+            ids[n] = image_id
+            matrix[n] = embedding
+            urls.append(transformed or permalink)
+        ids, matrix = ids[: len(urls)], matrix[: len(urls)]
 
-        matrix = np.stack(vectors).astype(options["dtype"])
         meta = {
             "model_id": model_id,
             "dim": matrix.shape[1],
@@ -83,7 +94,7 @@ class Command(BaseCommand):
         }
         np.savez(
             options["path"],
-            ids=np.array(ids, dtype=np.int64),
+            ids=ids,
             vectors=matrix,
             urls=np.array(urls),
             meta=np.array(json.dumps(meta)),
