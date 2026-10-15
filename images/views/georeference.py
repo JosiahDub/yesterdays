@@ -251,12 +251,15 @@ def georeference_interface(request):
             }
 
     # Build subject hints - always shown, rendered below other hints
-    # These come from subjects linked to the image that have OSM elements with centroids
+    # These come from subjects linked to the image that have OSM elements with centroids.
+    # Generic subjects (e.g. "fire hydrant") could be anywhere, so they give no hint.
     subject_hints = []
     if current_image:
-        subject_mappings = current_image.subject_mappings.prefetch_related(
-            "subject__osm_elements"
-        ).order_by("order")
+        subject_mappings = (
+            current_image.subject_mappings.filter(subject__generic=False)
+            .prefetch_related("subject__osm_elements")
+            .order_by("order")
+        )
         for mapping in subject_mappings:
             subject = mapping.subject
             # Use the first OSM element with a centroid
