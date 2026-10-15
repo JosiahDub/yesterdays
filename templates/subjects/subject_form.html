@@ -1,0 +1,48 @@
+{% extends 'base.html' %}
+
+{% block title %}Edit {{ subject.title }} – Yesterdays{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <nav aria-label="breadcrumb" class="mb-4">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="{% url 'home' %}">Home</a></li>
+                <li class="breadcrumb-item"><a href="{% url 'subjects:browse_subjects' %}">Subjects</a></li>
+                <li class="breadcrumb-item"><a href="{{ subject.get_absolute_url }}">{{ subject.title }}</a></li>
+                <li class="breadcrumb-item active" aria-current="page">Edit</li>
+            </ol>
+        </nav>
+        <h1 class="h3 mb-4">Edit {{ subject.title }}</h1>
+    </div>
+</div>
+
+<form method="post" action="{% url 'subjects:subject_edit' subject %}">
+    {% csrf_token %}
+
+    <div class="row g-4">
+        <div class="col-lg-10">
+            {% if form.non_field_errors %}
+                <div class="alert alert-danger">{{ form.non_field_errors }}</div>
+            {% endif %}
+
+            <div class="card shadow-sm mb-4">
+                <div class="card-header"><h2 class="h6 mb-0">Suppress from Hints</h2></div>
+                <div class="card-body">
+                    <div class="form-check">
+                        {{ form.generic }}
+                        <label class="form-check-label" for="{{ form.generic.id_for_label }}">{{ form.generic.label }}</label>
+                    </div>
+                    {% if form.generic.help_text %}<div class="form-text">{{ form.generic.help_text }}</div>{% endif %}
+                    {% for err in form.generic.errors %}<div class="invalid-feedback d-block">{{ err }}</div>{% endfor %}
+                </div>
+            </div>
+
+            <div class="d-flex flex-column flex-sm-row justify-content-sm-end gap-2 mb-4">
+                <a href="{{ subject.get_absolute_url }}" class="btn btn-secondary">Cancel</a>
+                <button type="submit" class="btn btn-primary"><i class="fas fa-save me-1"></i>Save</button>
+            </div>
+        </div>
+    </div>
+</form>
+{% endblock %}

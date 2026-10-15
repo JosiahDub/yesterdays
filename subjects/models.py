@@ -553,7 +553,7 @@ class Subject(models.Model):
     )
     generic = models.BooleanField(
         default=False,
-        help_text="Whether this subject is a generic concept rather than a specific entity",
+        help_text="If marked as generic, a subject will not be shown on the map.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

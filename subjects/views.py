@@ -3,6 +3,7 @@ from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib import messages
+from django.contrib.admin.views.decorators import staff_member_required
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.db import IntegrityError, connection, models, transaction
@@ -52,6 +53,7 @@ from images.policies import (
 from images.validation import InvalidInput, parse_json_body, validate_text
 from regions.context_processors import get_current_region
 
+from .forms import SubjectForm
 from .models import Subject, SubjectAncestor, WikidataItem
 from .name_search import annotate_name_match
 from .similarity import build_subject_query_embedding
@@ -887,6 +889,26 @@ def legacy_subject_redirect(request, legacy_slug, view_name):
     if query_string:
         url = f"{url}?{query_string}"
     return HttpResponsePermanentRedirect(url)
+
+
+@staff_member_required
+def subject_edit(request, qid):
+    """Edit a subject's locally-stored settings."""
+    subject = get_object_or_404(
+        Subject.objects.select_related("wikidata_item"),
+        wikidata_item__wikidata_id=qid,
+    )
+    if request.method == "POST":
+        form = SubjectForm(request.POST, instance=subject)
+        if form.is_valid():
+            subject = form.save()
+            messages.success(request, f'Saved subject "{subject.title}".')
+            return redirect(subject)
+    else:
+        form = SubjectForm(instance=subject)
+    return render(
+        request, "subjects/subject_form.html", {"subject": subject, "form": form}
+    )
 
 
 def subject_detail(request, qid):

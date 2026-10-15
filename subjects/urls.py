@@ -12,6 +12,7 @@ urlpatterns = [
     path("", views.browse_subjects, name="browse_subjects"),
     path("map/", views.subjects_map, name="subjects_map"),
     path("<subject:qid>/", views.subject_detail, name="subject_detail"),
+    path("<subject:qid>/edit/", views.subject_edit, name="subject_edit"),
     path(
         "<subject:qid>/similar/",
         views.find_similar_images_to_subject,
