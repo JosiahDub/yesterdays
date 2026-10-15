@@ -551,6 +551,10 @@ class Subject(models.Model):
         related_name="+",
         help_text="User-chosen representative image for this subject",
     )
+    generic = models.BooleanField(
+        default=False,
+        help_text="Whether this subject is a generic concept rather than a specific entity",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
