@@ -45,7 +45,7 @@ dev = [
 docs = ["zensical~=0.0.63"]
 
 [tool.uv]
-default-groups = ["docs"]
+default-groups = ["dev", "docs"]
 required-environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'"
 ]
@@ -53,3 +53,4 @@ required-environments = [
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "yesterdays.settings"
 python_files = "tests.py test_*.py *_tests.py"
+testpaths = ["api", "images", "maps", "subjects", "activity", "regions"]

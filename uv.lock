@@ -1852,7 +1852,7 @@ brotli = [
 name = "yesterdays"
 version = "0.1.0"
 source = { virtual = "." }
-default-groups = ["docs"]
+default-groups = ["dev", "docs"]
 dependencies = [
     { name = "boto3" },
     { name = "celery" },

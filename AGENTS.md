@@ -95,7 +95,11 @@ Project documentation (published at docs.yesterdays.today) is built from `docs/`
 
 ## Testing and CI
 
-Tests use Django's built-in `TestCase` and live in `api/tests.py`, `images/tests.py`, and `maps/tests.py` (no pytest). Run them with `docker compose exec web uv run manage.py test`. CI (`.github/workflows/`) builds the container image and the docs site, and type-checks the frontend (`typecheck.yml`, also run during the container build) — there is no automated Python test or lint step, so run tests locally.
+Tests are written with Django's built-in `TestCase` and live in each app's `tests.py`. Run them with **pytest** (via `pytest-django`, configured in `pyproject.toml`) rather than `manage.py test`:
+
+`docker compose exec web uv run pytest --reuse-db`
+
+Narrow the run with a path (`pytest images`), a node ID (`pytest images/tests.py::SomeTestCase::test_thing`), or `-k <expr>`. Pass `--create-db` once after adding or changing migrations so the reused test database is rebuilt. `testpaths` restricts collection to the Django apps, so `services/clip/` tests aren't picked up; they run from that service's own environment.
 
 ## Coding guidelines
 
