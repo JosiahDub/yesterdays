@@ -102,7 +102,7 @@ export default defineConfig({
         layer_edit: path.resolve(__dirname, "./assets/js/pages/layer_edit.ts"),
         activity_feed: path.resolve(
           __dirname,
-          "./assets/js/pages/activity_feed.js",
+          "./assets/js/pages/activity_feed.ts",
         ),
         directory_create: path.resolve(
           __dirname,

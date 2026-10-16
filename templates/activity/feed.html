@@ -4,7 +4,7 @@
 {% block title %}{% if current_region %}Activity in {{ current_region.long_name }} - Yesterdays{% else %}Activity Feed - Yesterdays{% endif %}{% endblock %}
 
 {% block extra_js %}
-{% vite_asset 'assets/js/pages/activity_feed.js' %}
+{% vite_asset 'assets/js/pages/activity_feed.ts' %}
 {% endblock %}
 
 {% block content %}
@@ -83,9 +83,8 @@
         </div>
         {% if events or none_selected %}
             <div x-data="activityFeed({{ has_more|yesno:'true,false' }}, {{ none_selected|yesno:'true,false' }})"
-                 @filter-changed.window="reloadFeed($event)"
-                 x-ref="feed">
-                <div class="activity-feed" x-ref="items">
+                 @filter-changed.window="reloadFeed($event)">
+                <div class="activity-feed" id="activity-feed-items">
                     {% for event_type, event, timestamp in events %}
                         <div class="activity-item" data-timestamp="{{ timestamp|date:'c' }}">
                             {% include 'activity/partials/event_card.html' %}

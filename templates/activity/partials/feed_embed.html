@@ -6,7 +6,7 @@ a clean list rather than cards within a card. No "Load More" — just a link
 through to the full feed. Expects `activity_events` in context.
 
 Styling comes from assets/styles/pages/activity.css; the including page's JS
-entry must import it (see home.js / activity_feed.js).
+entry must import it (see home.js / activity_feed.ts).
 {% endcomment %}
 <ul class="list-group list-group-flush activity-feed-embed">
     {% for event_type, event, timestamp in activity_events %}
