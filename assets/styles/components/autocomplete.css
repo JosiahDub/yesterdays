@@ -42,9 +42,10 @@
     background-color: var(--bs-tertiary-bg) !important;
 }
 
+/* Theme-aware subtle highlight, so .text-muted stays legible in both modes */
 .autoComplete_wrapper > ul > li[aria-selected="true"] {
-    background-color: var(--bs-primary) !important;
-    color: white !important;
+    background-color: var(--bs-primary-bg-subtle) !important;
+    color: var(--bs-primary-text-emphasis) !important;
 }
 
 /* Highlight matched text */

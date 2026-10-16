@@ -1177,7 +1177,7 @@ document.addEventListener("DOMContentLoaded", async function () {
                 <span style=\"text-overflow: ellipsis; white-space: nowrap; overflow: hidden;\">
                     ${data.match} <small class=\"text-muted ms-2\">${description}</small>
                 </span>
-                <span style=\"display: flex; align-items: center; font-size: 13px; font-weight: 100; text-transform: uppercase; color: rgba(0,0,0,.5);\">
+                <span class=\"text-muted\" style=\"display: flex; align-items: center; font-size: 13px; font-weight: 100; text-transform: uppercase;\">
                     ${data.value.wikidata_id || ""}
                 </span>`;
       },
