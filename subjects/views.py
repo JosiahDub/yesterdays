@@ -137,9 +137,13 @@ def _record_subject_activity(
 # sized like the old SPARQL free-text cap.
 _MAX_AUTOCOMPLETE_QUERY_LEN = 100
 
+# The tagging autocomplete shows a longer, scrollable list than the browse
+# dropdown, which shares its space with category matches.
+_SUBJECT_AUTOCOMPLETE_LIMIT = 15
 
-def _matching_subjects(query):
-    """Top ten Subjects by title-or-alias match, as both autocompletes list them."""
+
+def _matching_subjects(query, limit=10):
+    """Top Subjects by title-or-alias match, as both autocompletes list them."""
     return (
         annotate_name_match(
             Subject.objects.all(),
@@ -149,7 +153,7 @@ def _matching_subjects(query):
         )
         .annotate(lower_title=Lower("title"))
         .select_related("wikidata_item")
-        .order_by("match_rank", "-similarity", "lower_title")[:10]
+        .order_by("match_rank", "-similarity", "lower_title")[:limit]
     )
 
 
@@ -162,7 +166,7 @@ def subject_autocomplete(request):
         return JsonResponse([], safe=False)
 
     results = []
-    for subject in _matching_subjects(query):
+    for subject in _matching_subjects(query, limit=_SUBJECT_AUTOCOMPLETE_LIMIT):
         result = {
             "id": subject.id,
             "title": subject.title,

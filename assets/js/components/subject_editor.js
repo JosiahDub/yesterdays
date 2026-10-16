@@ -268,6 +268,10 @@ export function initSubjectEditor() {
         keys: ["title"],
         cache: false,
       },
+      // The list scrolls (see autocomplete.css), so show the server's full page.
+      resultsList: {
+        maxResults: 15,
+      },
       resultItem: {
         element: (item, data) => {
           item.style =
