@@ -15,7 +15,7 @@ Below is a table of external projects similar to Yesterdays.
 | [Hillview](https://hillview.cz) | proprietary ([source](https://github.com/koo5/hillview)) | Annotated panoramas, with a unique interface for finding vantage points. |
 | [historypin](https://www.historypin.org) | proprietary | A global collaborative project which includes photos on an interative map, filter-able by date. |
 | [Humap](https://humap.me/) | proprietary | A platform for displaying historical records on a map, with crowdsourcing elements. Powers sites such as [Layers of London](https://www.layersoflondon.org). |
-| [OldInsuranceMaps.net](oldinsurancemaps.net) | GPL-3.0 ([source](https://github.com/ohmg-dev/OldInsuranceMaps)) | A crowdsourcing site where users can georeference and stitch together pages of Sanborn insurance maps. Creator Adam Cox is a friend and supporter of Yesterdays, and we use OIM mosaics on our sites. |
+| [OldInsuranceMaps.net](https://oldinsurancemaps.net) | GPL-3.0 ([source](https://github.com/ohmg-dev/OldInsuranceMaps)) | A crowdsourcing site where users can georeference and stitch together pages of Sanborn insurance maps. Creator Adam Cox is a friend and supporter of Yesterdays, and we use OIM mosaics on our sites. |
 | [OldNYC](https://www.oldnyc.org) | Apache 2.0 ([source](https://github.com/danvk/oldnyc)) | A map of NYPL photo collections with crowdsourced elements including OCR'd metadata corrections. |
 | [OldSF](https://www.oldsf.org) | unknown | A map of photo collections from San Francisco Public Library. |
 | [OldTO](https://www.oldto.org/) | unknown | A map of historical photographs in Toronto. |
