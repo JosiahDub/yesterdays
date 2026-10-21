@@ -2,6 +2,7 @@ import logging
 import mimetypes
 from datetime import datetime
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import DatabaseError, connection, transaction
@@ -37,6 +38,7 @@ from rest_framework.response import Response
 from rest_framework_gis.filters import InBBoxFilter
 
 from activity.views import get_activity_events
+from images.embeddings import VECTOR_SQL
 from images.models import (
     AerialGeoreference,
     AerialGeoreferenceValidation,
@@ -51,12 +53,21 @@ from images.models import (
     SubjectMapping,
     SubjectMappingActivity,
 )
+from images.in_view import in_view_count, in_view_rows, parse_radius
 from images.tasks import process_image
 from images.utils import R2Uploader, get_confidence_breakdown, get_overall_stats
+from images.validation import InvalidInput, validate_latitude, validate_longitude
 from images.views.search import HAS_POSTGRES_SEARCH, _get_text_embedding
 from subjects.models import OsmElement, Subject
 
-from .filters import FromAboveGeoreferenceFilter, GeoreferenceFilter, ImageFilter
+from .filters import (
+    CollectionFilter,
+    FromAboveGeoreferenceFilter,
+    GeoreferenceFilter,
+    ImageFilter,
+    SourceFilter,
+    SubjectFilter,
+)
 from .pagination import GeoJsonDefaultPagination
 from .permissions import IsImporter, is_importer
 from .serializers import (
@@ -144,7 +155,7 @@ class SourceViewSet(
     """Archive sources containing collections of historical images."""
 
     serializer_class = SourceSerializer
-    filterset_fields = ["slug"]
+    filterset_class = SourceFilter
     ordering_fields = ["name"]
     ordering = ["name"]
 
@@ -192,7 +203,7 @@ class CollectionViewSet(
     """Collections of historical images within an archive source."""
 
     serializer_class = CollectionSerializer
-    filterset_fields = ["source", "slug"]
+    filterset_class = CollectionFilter
     ordering_fields = ["name", "source__name"]
     ordering = ["source__name", "name"]
 
@@ -296,7 +307,7 @@ class SubjectViewSet(viewsets.ReadOnlyModelViewSet):
     """Subjects (buildings, people, monuments, etc.) that appear in images."""
 
     serializer_class = SubjectSerializer
-    filterset_fields = ["slug"]
+    filterset_class = SubjectFilter
     ordering_fields = ["title", "image_count"]
     ordering = ["title"]
 
@@ -394,6 +405,7 @@ class FromAboveGeoreferenceViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_class = FromAboveGeoreferenceFilter
     filter_backends = [DjangoFilterBackend, RemappingOrderingFilter, InBBoxFilter]
     bbox_filter_field = "polygon"
+    bbox_filter_include_overlapping = True
     ordering_fields = ["georeferenced_at", "confidence", "validation_count"]
     ordering = ["-georeferenced_at"]
     ordering_field_map = {
@@ -534,7 +546,7 @@ def import_upload_url_view(request):
 
     try:
         collection = Collection.objects.get(pk=int(collection_id))
-    except (Collection.DoesNotExist, ValueError):
+    except Collection.DoesNotExist, ValueError:
         return Response(
             {"error": "Collection not found."},
             status=status.HTTP_404_NOT_FOUND,
@@ -793,11 +805,17 @@ def image_replace_view(request, id):
                     old_originals.append(key)
 
             cdn_url = r2.copy_object(slot.s3_key, dest_key)
+            # thumbnail, transformed_permalink and iiif_url deliberately keep
+            # pointing at the previous generation. Each flips to the new
+            # generation the instant that asset exists on R2 — the thumbnail
+            # when process_image finishes, iiif_url when generate_iiif_tiles
+            # does — so holding them here delays nothing. It only avoids the
+            # window where they are empty and every surface falls back to the
+            # raw original, which for a TIFF upload no browser can display.
+            # tile_status is cleared because it is the "tiles need rebuilding"
+            # flag, not a display field.
             Image.objects.filter(pk=image.id).update(
                 permalink=cdn_url,
-                thumbnail=None,
-                transformed_permalink=None,
-                iiif_url=None,
                 rotation=0,
                 mirror="none",
                 tile_status="",
@@ -836,7 +854,11 @@ def image_replace_view(request, id):
 
     def trigger_replace_processing():
         try:
-            process_image.delay(image.id)
+            # force=True: the derived-asset fields still hold the previous
+            # generation's URLs, so process_image's "nothing to do"
+            # short-circuit would otherwise skip rebuilding them from the
+            # new bytes.
+            process_image.delay(image.id, force=True)
         except Exception:
             logger.warning("Failed to queue process_image for image %d", image.id)
 
@@ -895,7 +917,7 @@ def _serialize_activity_event(event_type, obj, timestamp):
     """Convert one activity event tuple into a serializable dict."""
     if event_type == "group":
         images = []
-        for member in obj.members.all():
+        for member in obj.feed_members:
             image = member.image
             if image:
                 images.append(
@@ -910,9 +932,9 @@ def _serialize_activity_event(event_type, obj, timestamp):
             "timestamp": timestamp,
             "data": {
                 "user": obj.user.get_display_name() if obj.user else "Anonymous",
-                "count": obj.count,
+                "count": obj.feed_count,
                 "started_at": obj.started_at,
-                "ended_at": obj.ended_at,
+                "ended_at": obj.feed_ended_at,
                 "images": images,
             },
         }
@@ -946,7 +968,7 @@ def _serialize_activity_event(event_type, obj, timestamp):
         }
     elif event_type == "subject":
         images = []
-        for member in obj.members.all():
+        for member in obj.feed_members:
             if member.image:
                 images.append(
                     {
@@ -958,15 +980,15 @@ def _serialize_activity_event(event_type, obj, timestamp):
         data = {
             "user": obj.user.get_display_name(),
             "action": obj.action,
-            "count": obj.count,
+            "count": obj.feed_count,
             "started_at": obj.started_at,
-            "ended_at": obj.ended_at,
+            "ended_at": obj.feed_ended_at,
             "subject_id": obj.subject_id,
             "subject_title": obj.subject.title if obj.subject else None,
             "images": images,
         }
         if obj.action == "reordered":
-            first_member = obj.members.all()[0] if images else None
+            first_member = obj.feed_members[0] if images else None
             if first_member is not None:
                 data["previous_order"] = first_member.previous_order
                 data["new_order"] = first_member.new_order
@@ -1031,7 +1053,7 @@ def activity_view(request):
             before = datetime.fromisoformat(before_param)
             if timezone.is_naive(before):
                 before = timezone.make_aware(before)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return Response({"error": "Invalid 'before' timestamp"}, status=400)
 
     types_param = request.query_params.get("types", "")
@@ -1047,7 +1069,7 @@ def activity_view(request):
 
     try:
         limit = max(min(int(request.query_params.get("limit", 20)), 100), 1)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return Response(
             {"error": "Invalid 'limit' parameter. Must be an integer."},
             status=400,
@@ -1094,21 +1116,26 @@ def _parse_search_filters(params, table_ref="images_image"):
     where_conditions = []
     where_params = {}
 
-    # Georeferenced filtering
+    # Georeferenced filtering (mirrors Image.is_georeferenced: aerial images are
+    # judged by polygon georefs, others by point georefs)
     georeferenced = params.get("georeferenced")
     if georeferenced is not None:
         if georeferenced.lower() == "true":
             where_conditions.append(
                 sql.SQL(
-                    "EXISTS (SELECT 1 FROM images_georeference g"
-                    " WHERE g.image_id = {t}.id)"
+                    "(({t}.aerial = false AND EXISTS (SELECT 1 FROM images_georeference g"
+                    " WHERE g.image_id = {t}.id))"
+                    " OR ({t}.aerial = true AND EXISTS (SELECT 1 FROM images_aerialgeoreference ag"
+                    " WHERE ag.image_id = {t}.id)))"
                 ).format(t=t)
             )
         elif georeferenced.lower() == "false":
             where_conditions.append(
                 sql.SQL(
-                    "NOT EXISTS (SELECT 1 FROM images_georeference g"
-                    " WHERE g.image_id = {t}.id)"
+                    "NOT (({t}.aerial = false AND EXISTS (SELECT 1 FROM images_georeference g"
+                    " WHERE g.image_id = {t}.id))"
+                    " OR ({t}.aerial = true AND EXISTS (SELECT 1 FROM images_aerialgeoreference ag"
+                    " WHERE ag.image_id = {t}.id)))"
                 ).format(t=t)
             )
 
@@ -1141,55 +1168,118 @@ def _parse_search_filters(params, table_ref="images_image"):
                 Response({"error": "year_max must be an integer."}, status=400),
             )
 
-    # Subject filtering
+    # Subject filtering (supports integer PKs and Wikidata IDs like Q4321)
     subject = params.get("subject")
     if subject is not None:
-        try:
-            where_params["subject_id"] = int(subject)
+        raw_subjects = [s.strip() for s in subject.split(",") if s.strip()]
+        pk_ids = []
+        wikidata_ids = []
+
+        for item in raw_subjects:
+            if item.isdigit():
+                pk_ids.append(int(item))
+            else:
+                wikidata_ids.append(item)
+
+        sub_conditions = []
+        if pk_ids:
+            where_params["subject_pk_ids"] = pk_ids
+            sub_conditions.append("sm.subject_id = ANY(%(subject_pk_ids)s)")
+        if wikidata_ids:
+            where_params["wikidata_ids"] = wikidata_ids
+            sub_conditions.append(
+                "sm.subject_id IN ("
+                "  SELECT s.id FROM subjects_subject s"
+                "  JOIN subjects_wikidataitem w ON s.wikidata_item_id = w.id"
+                "  WHERE w.wikidata_id = ANY(%(wikidata_ids)s)"
+                ")"
+            )
+
+        if sub_conditions:
+            combined_sub = " OR ".join(sub_conditions)
             where_conditions.append(
                 sql.SQL(
                     "EXISTS (SELECT 1 FROM images_subjectmapping sm"
                     " WHERE sm.image_id = {t}.id"
-                    " AND sm.subject_id = %(subject_id)s)"
+                    f" AND ({combined_sub}))"
                 ).format(t=t)
             )
-        except ValueError:
-            return (
-                [],
-                {},
-                Response({"error": "subject must be an integer."}, status=400),
-            )
 
-    # Source filtering
+    # Source filtering (supports comma-separated IDs)
     source = params.get("source")
     if source is not None:
         try:
-            where_params["source_id"] = int(source)
+            source_ids = [int(s.strip()) for s in source.split(",") if s.strip()]
+            where_params["source_ids"] = source_ids
             where_conditions.append(
                 sql.SQL(
                     "{t}.collection_id IN (SELECT id FROM images_collection"
-                    " WHERE source_id = %(source_id)s)"
+                    " WHERE source_id = ANY(%(source_ids)s))"
                 ).format(t=t)
-            )
-        except ValueError:
-            return [], {}, Response({"error": "source must be an integer."}, status=400)
-
-    # Collection filtering
-    collection = params.get("collection")
-    if collection is not None:
-        try:
-            where_params["collection_id"] = int(collection)
-            where_conditions.append(
-                sql.SQL("{t}.collection_id = %(collection_id)s").format(t=t)
             )
         except ValueError:
             return (
                 [],
                 {},
-                Response({"error": "collection must be an integer."}, status=400),
+                Response(
+                    {"error": "source must be integers separated by commas."},
+                    status=400,
+                ),
+            )
+
+    # Collection filtering (supports comma-separated IDs)
+    collection = params.get("collection")
+    if collection is not None:
+        try:
+            collection_ids = [
+                int(c.strip()) for c in collection.split(",") if c.strip()
+            ]
+            where_params["collection_ids"] = collection_ids
+            where_conditions.append(
+                sql.SQL("{t}.collection_id = ANY(%(collection_ids)s)").format(t=t)
+            )
+        except ValueError:
+            return (
+                [],
+                {},
+                Response(
+                    {"error": "collection must be integers separated by commas."},
+                    status=400,
+                ),
             )
 
     return where_conditions, where_params, None
+
+
+def _format_in_view_result(request, image, row):
+    """Format one image + its nearest-georeference row into a result dict.
+
+    Deliberately not ``_format_search_result``: that one reports a
+    ``similarity`` of ``1.0 - distance``, which is meaningless for a distance
+    measured in metres.
+    """
+    return {
+        "id": image.id,
+        "title": image.title,
+        "permalink": image.display_permalink,
+        "thumbnail": image.thumbnail or image.display_permalink,
+        "original_date": image.original_date,
+        "date_display": image.date_display,
+        "distance_m": round(row["distance_m"], 1),
+        "georeference": {
+            "latitude": row["latitude"],
+            "longitude": row["longitude"],
+            "direction": row["direction"],
+            "confidence": row["confidence"],
+        },
+        "collection": {
+            "id": image.collection.id,
+            "name": image.collection.name,
+            "slug": image.collection.slug,
+            "source_name": image.collection.source.name,
+        },
+        "detail_url": request.build_absolute_uri(f"/api/v2/images/{image.id}/"),
+    }
 
 
 def _format_search_result(request, image, distance):
@@ -1216,7 +1306,7 @@ def _format_search_result(request, image, distance):
 
 @api_view(["GET"])
 def semantic_search_view(request):
-    """Search images by meaning using CLIP embeddings.
+    """Search images by meaning using image embeddings.
 
     Encodes the query text into a vector and finds images whose visual
     content is most similar, even if the words don't appear in the title
@@ -1262,6 +1352,13 @@ def semantic_search_view(request):
     except Exception:
         logger.warning("Failed to generate text embedding", exc_info=True)
         return Response({"error": "Could not process search query."}, status=400)
+    if len(query_embedding) != settings.EMBEDDING_DIMENSION:
+        logger.warning(
+            "Text embedding has %d dimensions, expected %d",
+            len(query_embedding),
+            settings.EMBEDDING_DIMENSION,
+        )
+        return Response({"error": "Could not process search query."}, status=400)
 
     where_conditions = [
         sql.SQL("embedding IS NOT NULL"),
@@ -1270,24 +1367,37 @@ def semantic_search_view(request):
     where_conditions.extend(extra_conditions)
     where_clause = sql.SQL(" AND ").join(where_conditions)
 
+    # The named-parameter form of images.embeddings.QUERY_VECTOR_SQL.
+    query_vector = sql.SQL(f"%(embedding)s::vector({settings.EMBEDDING_DIMENSION})")
+
     try:
-        with connection.cursor() as cursor:
+        with transaction.atomic(), connection.cursor() as cursor:
+            # Raise pgvector's HNSW search depth from its default of 40, as
+            # the HTML search does. Scoped to this transaction via SET LOCAL.
+            cursor.execute("SET LOCAL hnsw.ef_search = %s", [settings.HNSW_EF_SEARCH])
+
             # Total count
             count_sql = sql.SQL(
                 "SELECT COUNT(id) FROM images_image WHERE {where}"
             ).format(where=where_clause)
             cursor.execute(count_sql, extra_params)
-            total_count = cursor.fetchone()[0]
+            # HNSW can only rank ef_search candidates per query, so deeper
+            # results aren't reachable even if more matching rows exist.
+            total_count = min(cursor.fetchone()[0], settings.HNSW_EF_SEARCH)
 
             # Paginated results
             query_sql = sql.SQL(
                 "SELECT id,"
-                " (embedding::vector(768) <=> %(embedding)s::vector(768)) AS distance"
+                " ({vector} <=> {query_vector}) AS distance"
                 " FROM images_image"
                 " WHERE {where}"
-                " ORDER BY embedding::vector(768) <=> %(embedding)s::vector(768), id"
+                " ORDER BY {vector} <=> {query_vector}, id"
                 " LIMIT %(limit)s OFFSET %(offset)s"
-            ).format(where=where_clause)
+            ).format(
+                where=where_clause,
+                vector=sql.SQL(VECTOR_SQL),
+                query_vector=query_vector,
+            )
 
             params = {
                 **extra_params,
@@ -1488,3 +1598,112 @@ def text_search_view(request):
     except DatabaseError:
         logger.error("Database error in text search", exc_info=True)
         return Response({"error": "Search failed. Please try again."}, status=500)
+
+
+@api_view(["GET"])
+def in_view_search_view(request):
+    """Find images georeferenced near a coordinate, nearest first.
+
+    The inverse of the other search endpoints: instead of describing an image
+    and asking where it might be, you give a location and ask what it used to
+    look like. Each image appears once, at its most recent georeference, so a
+    location that has since been corrected is not resurfaced. Aerial
+    photographs, whose coverage is a polygon rather than a point, are not
+    included.
+
+    Results are photographs *of* the coordinate, not merely near it: an image
+    whose georeference records a direction is only returned when the
+    coordinate falls inside the cone that camera was pointing through.
+    Georeferences without a recorded direction are returned on distance alone.
+
+    No radius is required. Results are read straight off the spatial index in
+    distance order, so the query stops as soon as the page is full.
+
+    Query parameters:
+        lat: latitude of the origin (required)
+        lon: longitude of the origin (required)
+        radius: optional bound in metres (clamped to the configured maximum)
+        page: page number (default 1)
+        page_size: results per page (default 20, max 100)
+        year_min: minimum year
+        year_max: maximum year
+        source: filter by source ID
+        collection: filter by collection ID
+        subject: filter by subject ID
+    """
+    params = request.query_params
+
+    try:
+        latitude = validate_latitude(params, "lat")
+        longitude = validate_longitude(params, "lon")
+        radius_m = parse_radius(params, "radius")
+    except InvalidInput as exc:
+        return Response({"error": str(exc)}, status=400)
+
+    try:
+        page = max(int(params.get("page", 1)), 1)
+        page_size = min(max(int(params.get("page_size", 20)), 1), 100)
+    except ValueError:
+        return Response({"error": "Invalid pagination parameters."}, status=400)
+    offset = (page - 1) * page_size
+
+    # The shared filter helper already emits image-table fragments under the
+    # alias `i`, which is exactly what images.in_view expects.
+    extra_conditions, extra_params, err = _parse_search_filters(params, table_ref="i")
+    if err:
+        return err
+
+    try:
+        rows, has_more = in_view_rows(
+            latitude=latitude,
+            longitude=longitude,
+            limit=page_size,
+            offset=offset,
+            radius_m=radius_m,
+            extra_conditions=extra_conditions,
+            extra_params=extra_params,
+        )
+
+        # Without a radius every georeferenced image is technically a result,
+        # so a total would be a misleading way of saying "all of them". With
+        # one, the count is a cheap bounded query over the same index.
+        total_count = None
+        if radius_m is not None:
+            total_count = in_view_count(
+                latitude=latitude,
+                longitude=longitude,
+                radius_m=radius_m,
+                extra_conditions=extra_conditions,
+                extra_params=extra_params,
+            )
+    except InvalidInput as exc:
+        return Response({"error": str(exc)}, status=400)
+    except DatabaseError:
+        logger.error("Database error in in-view search", exc_info=True)
+        return Response({"error": "Search failed. Please try again."}, status=500)
+
+    images_by_id = {
+        img.id: img
+        for img in Image.objects.filter(
+            id__in=[row["image_id"] for row in rows]
+        ).select_related("collection__source")
+    }
+
+    results = []
+    for row in rows:
+        image = images_by_id.get(row["image_id"])
+        if image:
+            results.append(_format_in_view_result(request, image, row))
+
+    return Response(
+        {
+            "latitude": latitude,
+            "longitude": longitude,
+            "radius": radius_m,
+            "page": page,
+            "page_size": page_size,
+            "count": total_count,
+            "has_more": has_more,
+            "results": results,
+        }
+    )

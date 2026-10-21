@@ -8,7 +8,7 @@ import "../../styles/components/image-viewer.css";
 
 // Import components
 import { initSubjectEditor } from "../components/subject_editor.js";
-import { initImageViewer } from "../components/image_viewer.js";
+import { initImageViewer } from "../components/image_viewer";
 
 // Utility function for difficulty badge colors
 function getBootstrapColor(difficulty) {
@@ -574,6 +574,7 @@ document.addEventListener("DOMContentLoaded", function () {
     queueFeaturedImageForm.addEventListener("submit", function (e) {
       e.preventDefault();
       const formData = new FormData(queueFeaturedImageForm);
+      const region = (formData.get("region") || "").trim();
       const day = (formData.get("day") || "").trim();
       const note = (formData.get("note") || "").trim();
       const quoteMe = formData.get("quote_me") !== null;
@@ -593,7 +594,12 @@ document.addEventListener("DOMContentLoaded", function () {
           "Content-Type": "application/json",
           "X-CSRFToken": csrfToken,
         },
-        body: JSON.stringify({ day: day, note: note, quote_me: quoteMe }),
+        body: JSON.stringify({
+          region: region,
+          day: day,
+          note: note,
+          quote_me: quoteMe,
+        }),
       })
         .then((response) =>
           response.json().then((data) => ({ ok: response.ok, data: data })),

@@ -66,5 +66,5 @@ def subjects_in_order(ids):
     """
     if not ids:
         return []
-    subjects_by_id = Subject.objects.in_bulk(ids)
+    subjects_by_id = Subject.objects.select_related("wikidata_item").in_bulk(ids)
     return [(sid, subjects_by_id.get(sid)) for sid in ids]

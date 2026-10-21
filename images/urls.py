@@ -44,6 +44,32 @@ urlpatterns = [
     ),
     # Validation queue (staff)
     path("validation-queue/", views.validation_queue, name="validation_queue"),
+    # Duplicate image pair review (staff)
+    path(
+        "duplicate-pairs/",
+        views.duplicate_image_pairs,
+        name="duplicate_image_pairs",
+    ),
+    path(
+        "duplicate-pairs/<uuid:pair_uuid>/",
+        views.duplicate_pair_detail,
+        name="duplicate_pair_detail",
+    ),
+    path(
+        "duplicate-pairs/<uuid:pair_uuid>/resolve/",
+        views.resolve_duplicate_pair,
+        name="resolve_duplicate_pair",
+    ),
+    path(
+        "duplicate-pairs/<uuid:pair_uuid>/dismiss/",
+        views.dismiss_duplicate_pair,
+        name="dismiss_duplicate_pair",
+    ),
+    path(
+        "duplicate-pairs/<uuid:pair_uuid>/restore/",
+        views.restore_duplicate_pair,
+        name="restore_duplicate_pair",
+    ),
     # List and detail views
     path("", views.image_list, name="image_list"),
     path("stats/", views.image_stats, name="image_stats"),
@@ -94,6 +120,17 @@ urlpatterns = [
         views.mark_aerial,
         name="mark_aerial",
     ),
+    # Bulk image management (staff only)
+    path(
+        "api/v1/bulk/from-above/",
+        views.bulk_mark_aerial,
+        name="bulk_mark_aerial",
+    ),
+    path(
+        "api/v1/bulk/will-not-georef/",
+        views.bulk_mark_will_not_georef,
+        name="bulk_mark_will_not_georef",
+    ),
     path(
         "<int:image_id>/queue-featured-image/",
         views.queue_featured_image,
@@ -127,6 +164,7 @@ urlpatterns = [
     ),
     path("api/v1/search/", views.semantic_search, name="semantic_search"),
     path("api/v1/search/text/", views.text_search, name="text_search"),
+    path("api/v1/search/in-view/", views.in_view_search, name="in_view_search"),
     path(
         "api/v1/search/reverse/",
         views.reverse_image_search,

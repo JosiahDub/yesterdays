@@ -1,11 +1,16 @@
 /* This stylesheet is for both georeference interfaces, "point" and "from above" */
 
-/* Card layout */
-#primary-georeference-cards {
-    padding-left: calc(var(--bs-gutter-x) * 0.5);
-    padding-right: calc(var(--bs-gutter-x) * 0.5);
+/* Header and notes/actions sections are capped at the sitewide .container
+ * width. Below the sm breakpoint .container is full width anyway, so drop its
+ * padding to avoid doubling the gutter main.container-fluid already provides. */
+@media (max-width: 575.98px) {
+    .container.georeference-capped {
+        padding-left: 0;
+        padding-right: 0;
+    }
 }
 
+/* Card layout */
 #image-preview-card {
     flex: 0 1 auto;
     max-width: 50em;
@@ -32,7 +37,7 @@
 }
 
 .card {
-    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    box-shadow: var(--bs-box-shadow-sm);
 }
 
 .form-control:focus {
@@ -148,38 +153,6 @@
 #direction-input.inactive {
     background-color: var(--bs-secondary-bg);
     color: var(--bs-secondary-color);
-}
-
-#joystick-container {
-    display: block;
-    position: relative;
-    width: 6.5em;
-    height: 6.5em;
-    min-width: 6.5em;
-    background: var(--bs-secondary-bg);
-    border: 0.1em solid var(--bs-border-color);
-    border-radius: 50%;
-    flex-shrink: 0;
-    user-select: none;
-    touch-action: none;
-}
-
-#joystick-handle {
-    width: 1.5em;
-    height: 1.5em;
-    background: var(--bs-secondary);
-    border-radius: 50%;
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    cursor: grab;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
-    transition: none;
-}
-
-#joystick-handle:active {
-    cursor: grabbing;
 }
 
 #mapswap-container {
@@ -373,23 +346,4 @@
 .maplibregl-ctrl-geocoder--icon-search {
     top: 0.5em;
     left: 0.5em;
-}
-
-/* Subject card styles */
-.autoComplete_wrapper > ul {
-    border: 1px solid var(--bs-border-color);
-    border-radius: var(--bs-border-radius);
-    background-color: var(--bs-body-bg);
-    margin-top: 0.25rem;
-    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
-}
-.autoComplete_wrapper > ul > li {
-    padding: 0.5rem 1rem;
-}
-.autoComplete_wrapper > ul > li:hover {
-    background-color: #e9ecef;
-}
-.autoComplete_wrapper > ul > li[aria-selected="true"] {
-    background-color: #0d6efd;
-    color: white;
 }

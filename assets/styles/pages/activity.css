@@ -6,6 +6,12 @@
    the feed is fully styled from this one stylesheet. */
 @import "../components/markdown.css";
 
+/* Hide Alpine-controlled elements (feed spinner, card expanders) until
+   Alpine initializes. */
+[x-cloak] {
+    display: none !important;
+}
+
 /* Square thumbnail for activity card previews (mobile) */
 .activity-thumbnail {
     width: 5em;

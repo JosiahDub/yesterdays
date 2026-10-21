@@ -8,6 +8,8 @@
     </div>
     {% endif %}
 
+    {# Grid, pagination and empty state; from_above.ts swaps this in place. #}
+    <div data-grid-results>
     {% if page_obj %}
         <div class="row" {{ row_attrs }}>
             {% for image in page_obj %}
@@ -21,6 +23,7 @@
     {% else %}
         {% include 'images/partials/empty_images.html' with empty_message=empty_message|default:"No images found." empty_icon=empty_icon|default:"fa-images" staff_message=staff_message staff_action_url=staff_action_url staff_action_text=staff_action_text %}
     {% endif %}
+    </div>
 
     {% if show_toolbar and user.is_authenticated %}
         {% include 'images/partials/bulk_modals.html' %}

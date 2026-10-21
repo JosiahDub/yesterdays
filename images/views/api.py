@@ -1,10 +1,14 @@
 import hashlib
 import json
 
+from django.conf import settings
 from django.contrib.gis.geos import Point
 from django.db import connection
 from django.http import HttpResponse, JsonResponse
+from django.shortcuts import get_object_or_404
 from django.urls import reverse
+
+from regions.models import Region
 
 from ..models import Image, TileVersion
 from .core import get_min_scale_for_zoom
@@ -239,7 +243,7 @@ def polygonal_georeferences_at_point(request):
     try:
         lat = float(request.GET.get("lat"))
         lon = float(request.GET.get("lon"))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return JsonResponse(
             {"error": "Invalid or missing lat/lon parameters"}, status=400
         )
@@ -333,8 +337,25 @@ def vector_tiles_endpoint(request, z, x, y, v=None):
     source_id = request.GET.get("source")
     subject_id = request.GET.get("subject")
     album_id = request.GET.get("album")
+    georeferenced_by = request.GET.get("georeferenced_by")
 
-    is_filtered = any([image_id, collection_id, source_id, subject_id, album_id])
+    region_qid = request.GET.get("region")
+    region = (
+        get_object_or_404(Region, wikidata_item__wikidata_id=region_qid)
+        if region_qid
+        else None
+    )
+    is_filtered = any(
+        [
+            image_id,
+            collection_id,
+            source_id,
+            subject_id,
+            album_id,
+            georeferenced_by,
+            region,
+        ]
+    )
 
     mvt_data = _generate_tile(
         z,
@@ -346,6 +367,8 @@ def vector_tiles_endpoint(request, z, x, y, v=None):
         source_id,
         subject_id,
         album_id,
+        georeferenced_by,
+        region=region,
     )
 
     return _make_tile_response(mvt_data, is_filtered, versioned=v is not None)
@@ -383,6 +406,8 @@ def _generate_tile(
     source_id,
     subject_id,
     album_id,
+    georeferenced_by=None,
+    region=None,
 ) -> bytes:
     """Generate MVT tile from database."""
 
@@ -409,6 +434,15 @@ def _generate_tile(
             "image_id IN (SELECT i.id FROM images_image i JOIN images_collection c ON i.collection_id = c.id WHERE c.source_id = %s)"
         )
         where_params.append(source_id)
+    if region is not None:
+        effective_region_sql = Image.EFFECTIVE_REGION_SQL.format(alias="i.")
+        where_conditions.append(
+            "image_id IN (SELECT i.id FROM images_image i "
+            "WHERE i.duplicate_of_id IS NULL AND "
+            + effective_region_sql
+            + " = ANY(%s))"
+        )
+        where_params.append(region.self_and_descendant_ids())
     if subject_id:
         # Include images mapped to this subject OR to any descendant subject
         # (one whose materialized ancestor set in subjects_subjectancestor
@@ -432,6 +466,15 @@ def _generate_tile(
             "image_id IN (SELECT image_id FROM images_albumimage WHERE album_id = %s)"
         )
         where_params.append(album_id)
+    if georeferenced_by:
+        # Matches on georeference_id, not image_id: the materialized view keeps
+        # only the latest georeference per image, so this is "images whose
+        # current georeference is this user's". Images they georeferenced but
+        # someone else has since corrected are deliberately not their pins.
+        where_conditions.append(
+            "georeference_id IN (SELECT id FROM images_georeference WHERE georeferenced_by_id = %s)"
+        )
+        where_params.append(georeferenced_by)
 
     where_clause = " AND ".join(where_conditions)
 
@@ -474,17 +517,35 @@ def _generate_tile(
             return b""
 
 
+def _osm_tile_response(mvt_data: bytes) -> HttpResponse:
+    """OSM element tiles change whenever the refresh rotation runs, so browsers
+    always revalidate and only the edge holds them, briefly."""
+    response = HttpResponse(mvt_data, content_type="application/x-protobuf")
+    response["Cache-Control"] = (
+        f"public, max-age=0, s-maxage={settings.SUBJECT_MAP_TILE_CACHE_SECONDS}"
+    )
+    response["ETag"] = f'"{hashlib.md5(mvt_data).hexdigest()}"'
+    return response
+
+
 def osm_elements_vector_tiles_endpoint(request, z, x, y):
     """Return MVT vector tiles of OSM elements (mixed geometries: points, lines, polygons)"""
+
+    # Subject outlines aren't legible this far out, and elements now span the
+    # globe, so a low-zoom tile would transform every geometry in the table.
+    if z < settings.SUBJECT_MAP_MIN_ZOOM:
+        return _osm_tile_response(b"")
 
     sql = """
         SELECT ST_AsMVT(mvtgeoms.*, 'osm_elements') as mvt FROM (
             SELECT
                 ST_AsMVTGeom(ST_Transform(oe.geometry, 3857), ST_TileEnvelope(%s, %s, %s)) AS geom,
                 oe.osm_id as osm_id,
+                oe.osm_type as osm_type,
                 ST_GeometryType(oe.geometry) as geom_type,
                 s.title as subject_name,
-                s.slug as subject_slug,
+                -- Mirrors Subject.url_key: the Q-ID, then "-<slug>" if any.
+                w.wikidata_id || COALESCE('-' || NULLIF(s.slug, ''), '') as subject_key,
                 COALESCE(
                     string_agg(CAST(sm.image_id AS text), ','),
                     ''
@@ -492,9 +553,10 @@ def osm_elements_vector_tiles_endpoint(request, z, x, y):
                 oe.geometry_area as geometry_area
             FROM subjects_osmelement oe
             LEFT JOIN subjects_subject s ON s.id = oe.subject_id
+            INNER JOIN subjects_wikidataitem w ON w.id = s.wikidata_item_id
             INNER JOIN images_subjectmapping sm ON s.id = sm.subject_id
             WHERE ST_Intersects(oe.geometry, ST_Transform(ST_TileEnvelope(%s, %s, %s), 4326))
-            GROUP BY oe.id, s.id, oe.osm_id, oe.geometry, s.title, s.slug, oe.geometry_area
+            GROUP BY oe.id, s.id, oe.osm_id, oe.osm_type, oe.geometry, s.title, s.slug, w.wikidata_id, oe.geometry_area
             ORDER BY
                 CASE
                     WHEN ST_GeometryType(oe.geometry) IN ('ST_Polygon', 'ST_MultiPolygon') THEN oe.geometry_area
@@ -510,9 +572,4 @@ def osm_elements_vector_tiles_endpoint(request, z, x, y):
         cursor.execute(sql, query_params)
         result = cursor.fetchone()
 
-        if result and result[0]:
-            mvt_data = bytes(result[0])
-            response = HttpResponse(mvt_data, content_type="application/x-protobuf")
-            return response
-        else:
-            return HttpResponse(b"", content_type="application/x-protobuf")
+    return _osm_tile_response(bytes(result[0]) if result and result[0] else b"")

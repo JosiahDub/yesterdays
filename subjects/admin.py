@@ -1,8 +1,11 @@
+from django.conf import settings
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.urls import path, reverse
+from django.utils import timezone
+from django.utils.formats import localize
 from django.utils.html import format_html
 
 from .models import (
@@ -11,8 +14,22 @@ from .models import (
     OsmElement,
     Person,
     Subject,
+    WikidataAlias,
     WikidataItem,
 )
+
+
+class WikidataAliasInline(admin.TabularInline):
+    """Read-only: aliases are mirrored from Wikidata on each closure load."""
+
+    model = WikidataAlias
+    extra = 0
+    fields = ("language", "alias")
+    readonly_fields = ("language", "alias")
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(WikidataItem)
@@ -23,11 +40,19 @@ class WikidataItemAdmin(admin.ModelAdmin):
         "description_truncated",
         "va_landmark_id",
         "inception",
+        "demolished",
         "last_updated",
     )
-    list_filter = ("last_updated", "inception")
-    search_fields = ("wikidata_id", "title", "description", "va_landmark_id")
+    list_filter = ("last_updated", "inception", "demolished")
+    search_fields = (
+        "wikidata_id",
+        "title",
+        "description",
+        "va_landmark_id",
+        "aliases__alias",
+    )
     readonly_fields = ("created_at", "last_updated", "wikidata_url", "refresh_button")
+    inlines = [WikidataAliasInline]
     actions = ["refresh_selected_wikidata_items"]
 
     def get_urls(self):
@@ -62,7 +87,8 @@ class WikidataItemAdmin(admin.ModelAdmin):
                 messages.warning(
                     request,
                     f"No data found for {wikidata_item.wikidata_id}. "
-                    f"The item may not exist or may not have English labels.",
+                    f"The item may not exist or may not have an English or "
+                    f"default label.",
                 )
         except ValidationError as e:
             error_msg = str(e)
@@ -153,7 +179,13 @@ class WikidataItemAdmin(admin.ModelAdmin):
         (
             "Additional Metadata",
             {
-                "fields": ("va_landmark_id", "architect", "image_url", "inception"),
+                "fields": (
+                    "va_landmark_id",
+                    "architect",
+                    "image_url",
+                    "inception",
+                    "demolished",
+                ),
                 "description": "Optional additional information about the subject",
             },
         ),
@@ -214,8 +246,8 @@ class OccupationAdmin(admin.ModelAdmin):
 class OsmElementInline(admin.TabularInline):
     model = OsmElement
     extra = 0
-    fields = ("osm_id", "geometry_area", "updated_at")
-    readonly_fields = ("osm_id", "geometry_area", "updated_at")
+    fields = ("osm_type", "osm_id", "geometry_area", "updated_at")
+    readonly_fields = ("osm_type", "osm_id", "geometry_area", "updated_at")
     can_delete = False
     show_change_link = True
 
@@ -225,8 +257,15 @@ class OsmElementInline(admin.TabularInline):
 
 @admin.register(OsmElement)
 class OsmElementAdmin(admin.ModelAdmin):
-    list_display = ("osm_id", "subject", "geometry_area", "updated_at", "created_at")
-    list_filter = ("updated_at", "created_at")
+    list_display = (
+        "osm_type",
+        "osm_id",
+        "subject",
+        "geometry_area",
+        "updated_at",
+        "created_at",
+    )
+    list_filter = ("osm_type", "updated_at", "created_at")
     search_fields = ("osm_id", "subject__title")
     readonly_fields = ("created_at", "updated_at", "geometry_area")
     autocomplete_fields = ["subject"]
@@ -250,9 +289,15 @@ class SubjectAdmin(admin.ModelAdmin):
         "wikidata_item__title",
         "wikidata_item__description",
     )
-    readonly_fields = ("created_at", "updated_at")
+    readonly_fields = (
+        "created_at",
+        "updated_at",
+        "wikidata_refresh_status",
+        "wikidata_item_display",
+    )
     autocomplete_fields = ["wikidata_item"]
     inlines = [OsmElementInline]
+    actions = ["queue_selected_for_wikidata_refresh"]
 
     fieldsets = (
         (
@@ -262,8 +307,12 @@ class SubjectAdmin(admin.ModelAdmin):
         (
             "Linked Data",
             {
-                "fields": ("wikidata_item",),
-                "description": "Optional link to Wikidata. OSM elements are shown below.",
+                "fields": ("wikidata_item", "wikidata_refresh_status"),
+                "description": (
+                    "The Wikidata item is chosen once, when the subject is "
+                    "created, and can't be changed afterwards. OSM elements "
+                    "are shown below."
+                ),
             },
         ),
         (
@@ -275,12 +324,111 @@ class SubjectAdmin(admin.ModelAdmin):
         ),
     )
 
+    def get_fieldsets(self, request, obj=None):
+        """Swap the Wikidata picker for a read-only link on existing subjects.
+
+        A Subject *is* its Wikidata item — the one-to-one is the subject's
+        identity, so the picker only makes sense on the add form.
+        Repointing it later would silently re-identify every image already
+        tagged with the subject; the fix for a wrong link is a new subject,
+        not an edit.
+        """
+        fieldsets = super().get_fieldsets(request, obj)
+        if obj is None:
+            return fieldsets
+        return [
+            (
+                name,
+                {
+                    **options,
+                    "fields": tuple(
+                        "wikidata_item_display" if field == "wikidata_item" else field
+                        for field in options["fields"]
+                    ),
+                },
+            )
+            for name, options in fieldsets
+        ]
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                "<path:object_id>/queue-wikidata-refresh/",
+                self.admin_site.admin_view(self.queue_wikidata_refresh),
+                name="subjects_subject_queue_wikidata_refresh",
+            ),
+        ]
+        return custom_urls + urls
+
+    def queue_wikidata_refresh(self, request, object_id):
+        """Put this subject's Wikidata item at the front of the refresh line."""
+        subject = get_object_or_404(Subject, pk=object_id)
+        subject.wikidata_item.queue_sparql_refresh()
+
+        messages.success(
+            request,
+            f"Queued {subject.wikidata_item.wikidata_id} for a Wikidata refresh. "
+            f"A background worker picks up the next queued item roughly every "
+            f"{settings.METADATA_REFRESH_WIKIDATA_INTERVAL} seconds.",
+        )
+
+        return HttpResponseRedirect(
+            reverse("admin:subjects_subject_change", args=[object_id])
+        )
+
+    @admin.action(description="Queue for Wikidata metadata refresh")
+    def queue_selected_for_wikidata_refresh(self, request, queryset):
+        queued = 0
+
+        for subject in queryset.select_related("wikidata_item"):
+            subject.wikidata_item.queue_sparql_refresh()
+            queued += 1
+
+        self.message_user(
+            request,
+            f"Queued {queued} subject(s) for a Wikidata refresh, one every "
+            f"~{settings.METADATA_REFRESH_WIKIDATA_INTERVAL} seconds.",
+        )
+
+    def wikidata_item_display(self, obj):
+        """Read-only stand-in for the ``wikidata_item`` picker."""
+        return format_html(
+            '{} (<a href="{}">edit</a> · <a href="{}" target="_blank" '
+            'rel="noopener">{}</a>)',
+            obj.wikidata_item.title,
+            reverse("admin:subjects_wikidataitem_change", args=[obj.wikidata_item.pk]),
+            obj.wikidata_item.wikidata_url,
+            obj.wikidata_item.wikidata_id,
+        )
+
+    wikidata_item_display.short_description = "Wikidata item"
+
+    def wikidata_refresh_status(self, obj):
+        """Queue button, or the pending request if one is already in flight."""
+        if not obj.pk:
+            return "Save subject first"
+        requested_at = obj.wikidata_item.sparql_refresh_requested_at
+        if requested_at:
+            return format_html(
+                "Queued {} — waiting for the next background refresh.",
+                localize(timezone.localtime(requested_at)),
+            )
+        return format_html(
+            '<a class="default" href="{}" style="background: #417690; color: white; '
+            "padding: 8px 12px; text-decoration: none; border-radius: 4px; "
+            'display: inline-block; margin: 5px 0; font-size: 12px;" '
+            'title="Jump to the front of the background Wikidata refresh queue">'
+            "Manually Queue for Update</a>",
+            reverse("admin:subjects_subject_queue_wikidata_refresh", args=[obj.pk]),
+        )
+
+    wikidata_refresh_status.short_description = "Wikidata refresh"
+
     def description_truncated(self, obj):
         description = obj.get_description()
         if description:
-            return (
-                description[:100] + "..." if len(description) > 100 else description
-            )
+            return description[:100] + "..." if len(description) > 100 else description
         return ""
 
     description_truncated.short_description = "Description"

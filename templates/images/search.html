@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% load django_vite %}
+{% load static %}
 
-{% block title %}Search – Yesterdays{% endblock %}
+{% block title %}{% if current_region %}Search – Yesterdays of {{ current_region.long_name }}{% else %}Search – Yesterdays{% endif %}{% endblock %}
 
 {% block extra_css %}
 <style>
@@ -21,6 +22,7 @@
     // Configuration object for bulk operations and album dropdown
     window.filterConfig = {
         isAuthenticated: {{ request.user.is_authenticated|yesno:'true,false' }},
+        regionName: {% if current_region %}'{{ current_region.long_name|escapejs }}'{% else %}null{% endif %},
         urls: {
             subjectsApi: '{% url "subject_autocomplete" %}',
             bulkAddSubject: '{% url "bulk_add_subject_to_images" %}',
@@ -42,9 +44,15 @@
 <div class="container-fluid mt-4">
     <div class="row">
         <div class="col-12">
-            <h1 class="mb-4">
+            <h1 class="mb-{% if current_region %}2{% else %}4{% endif %}">
                 <i class="fas fa-search me-2"></i>Image Search
             </h1>
+            {% if current_region %}
+            <p class="lead mb-4">
+                Searching images of {{ current_region.long_name }}, including places within it.
+                Switch to Global in the region selector to search everywhere.
+            </p>
+            {% endif %}
 
             <!-- Search Form (narrower, centered) -->
             <div class="row justify-content-center">
@@ -68,6 +76,11 @@
                                 <input type="radio" class="btn-check" name="searchMode" id="reverseMode" value="reverse" autocomplete="off">
                                 <label class="btn btn-outline-primary" for="reverseMode">
                                     <i class="fas fa-image me-1"></i>Reverse Image
+                                </label>
+
+                                <input type="radio" class="btn-check" name="searchMode" id="inViewMode" value="in-view" autocomplete="off">
+                                <label class="btn btn-outline-primary" for="inViewMode">
+                                    <i class="fas fa-location-dot me-1"></i>In View
                                 </label>
                             </div>
                         </div>
@@ -93,6 +106,10 @@
                             Please <a href="{% url 'osm_auth:login' %}" class="fw-bold" style="color: black; text-decoration: underline;">login with OpenStreetMap</a> to use reverse image search. Creating an account is free!
                         </div>
                         {% endif %}
+                        <p class="card-text mb-3" id="inViewDescription" style="display: none;">
+                            Pick a spot on the map to find the photographs that have it in view,
+                            nearest first.
+                        </p>
                     </div>
 
                     <form id="searchForm">
@@ -135,6 +152,37 @@
                                 </button>
                             </div>
                             {% endif %}
+                        </div>
+
+                        <!-- In View (coordinate) Search Input -->
+                        <div id="inViewSearchContainer" style="display: none;">
+                            <div id="inViewPickerMap" class="border rounded mb-3" style="height: 320px;"
+                                 data-direction-sprite="{% static 'images/surveillance-direction.png' %}"></div>
+                            <div class="row g-2 align-items-end">
+                                <div class="col-sm-3">
+                                    <label for="inViewLat" class="form-label mb-1">Latitude:</label>
+                                    <input type="text" class="form-control form-control-sm font-monospace" id="inViewLat" placeholder="YY.YYYY">
+                                </div>
+                                <div class="col-sm-3">
+                                    <label for="inViewLon" class="form-label mb-1">Longitude:</label>
+                                    <input type="text" class="form-control form-control-sm font-monospace" id="inViewLon" placeholder="XX.XXXX">
+                                </div>
+                                <div class="col-sm-3">
+                                    <label for="inViewRadius" class="form-label mb-1">Within:</label>
+                                    <select class="form-select form-select-sm" id="inViewRadius">
+                                        <option value="" selected>Any distance</option>
+                                        <option value="100">100 m</option>
+                                        <option value="500">500 m</option>
+                                        <option value="1000">1 km</option>
+                                        <option value="5000">5 km</option>
+                                    </select>
+                                </div>
+                                <div class="col-sm-3">
+                                    <button type="submit" class="btn btn-primary w-100">
+                                        <i class="fas fa-search me-1"></i>Search
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     </form>
 

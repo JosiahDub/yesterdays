@@ -13,7 +13,11 @@
 
 
 {% block extra_css %}
+{% if image.iiif_url %}
+<link rel="preload" href="{{ image.iiif_url }}/info.json" as="fetch" crossorigin>
+{% else %}
 <link rel="preload" as="image" href="{{ image.display_permalink }}">
+{% endif %}
 {% endblock %}
 
 
@@ -77,6 +81,7 @@
         <!-- Breadcrumb -->
         <nav aria-label="breadcrumb" class="mb-4">
             <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="{% url 'home' %}">Home</a></li>
                 <li class="breadcrumb-item"><a href="{% url 'images:browse_sources' %}">Sources</a></li>
                 <li class="breadcrumb-item"><a href="{{ image.collection.source.get_absolute_url }}">{{ image.collection.source.name }}</a></li>
                 <li class="breadcrumb-item"><a href="{{ image.collection.get_absolute_url }}">{{ image.collection.name }}</a></li>
@@ -99,27 +104,29 @@
                             {% endif %}
                         </h5>
                         <div class="d-flex gap-2 flex-wrap">
-
-                            {% if image.difficulty %}
-                                <span class="badge status-badge
-                                    {% if image.difficulty == 'easy' %}bg-success
-                                    {% elif image.difficulty == 'medium' %}text-bg-warning
-                                    {% else %}bg-danger{% endif %}">
-                                    <i class="fas fa-signal me-1"></i>{{ image.difficulty|capfirst }}
-                                </span>
-                            {% endif %}
-
-                            <span class="badge status-badge {% if image.duplicate_of %}bg-secondary{% elif image.is_georeferenced %}bg-success{% elif image.will_not_georef %}bg-secondary{% else %}text-bg-warning{% endif %}">
-                                {% if image.duplicate_of %}
-                                    <i class="fas fa-copy me-1"></i>Duplicate
-                                {% elif image.is_georeferenced %}
-                                    <i class="fas fa-map-marker-alt me-1"></i>Georeferenced
-                                {% elif image.will_not_georef %}
-                                    <i class="fas fa-ban me-1"></i>Will Not Georeference
-                                {% else %}
-                                    <i class="fas fa-clock me-1"></i>Available
+                            {% with georeferenced=image.is_georeferenced %}
+                                <!-- Difficulty only shown if image needs georeferencing -->
+                                {% if image.difficulty and not georeferenced and not image.will_not_georef %}
+                                    <span class="badge status-badge
+                                        {% if image.difficulty == 'easy' %}bg-success
+                                        {% elif image.difficulty == 'medium' %}text-bg-warning
+                                        {% else %}bg-danger{% endif %}">
+                                        <i class="fas fa-signal me-1"></i>{{ image.difficulty|capfirst }}
+                                    </span>
                                 {% endif %}
-                            </span>
+
+                                <span class="badge status-badge {% if image.duplicate_of %}bg-secondary{% elif georeferenced %}bg-success{% elif image.will_not_georef %}bg-secondary{% else %}text-bg-warning{% endif %}">
+                                    {% if image.duplicate_of %}
+                                        <i class="fas fa-copy me-1"></i>Duplicate
+                                    {% elif georeferenced %}
+                                        <i class="fas fa-map-marker-alt me-1"></i>Georeferenced
+                                    {% elif image.will_not_georef %}
+                                        <i class="fas fa-ban me-1"></i>Will Not Georeference
+                                    {% else %}
+                                        <i class="fas fa-clock me-1"></i>Available
+                                    {% endif %}
+                                </span>
+                            {% endwith %}
                         </div>
                     </div>
                     <div class="card-body p-0">
@@ -240,6 +247,23 @@
 
                             <dt class="col-sm-5">Date:</dt>
                             <dd class="col-sm-7">{{ image.date_display }}</dd>
+
+                            <dt class="col-sm-5">Region:</dt>
+                            <dd class="col-sm-7">
+                                {% if image.region %}
+                                    {{ image.region.long_name }}
+                                {% elif image.collection.region %}
+                                    {{ image.collection.region.long_name }}
+                                    <br>
+                                    <span class="text-muted small">(inherited from collection)</span>
+                                {% elif image.collection.source.region %}
+                                    {{ image.collection.source.region.long_name }}
+                                    <br>
+                                    <span class="text-muted small">(inherited from source)</span>
+                                {% else %}
+                                    <span class="text-muted">None</span>
+                                {% endif %}
+                            </dd>
 
                             {% if image.description %}
                                 <dt class="col-sm-5">Description:</dt>
@@ -728,7 +752,7 @@
                             {% for duplicate in image.duplicates.all %}
                             <div class="col-lg-3 col-md-4 col-sm-6">
                                 <div class="card h-100 shadow-sm">
-                                    <img src="{{ duplicate.display_permalink }}"
+                                    <img src="{% if duplicate.thumbnail %}{{ duplicate.thumbnail }}{% else %}{{ duplicate.display_permalink }}{% endif %}"
                                          alt="{% if duplicate.title %}{{ duplicate.title }}{% else %}Duplicate Image #{{ duplicate.id }}{% endif %}"
                                          class="card-img-top"
                                          style="height: 200px; object-fit: cover; cursor: pointer;"
@@ -881,10 +905,28 @@
             <form id="queueFeaturedImageForm">
                 <div class="modal-body">
                     {% csrf_token %}
+                    {% if queue_regions %}
+                    <div class="mb-3">
+                        <label for="featuredImageRegion" class="form-label">Region</label>
+                        <select class="form-select" id="featuredImageRegion" name="region" required>
+                            {% if not queue_default_region %}
+                            <!-- Nothing to preselect, so make the empty choice explicit
+                                 rather than let the browser pick the first region. -->
+                            <option value="" selected disabled>Choose a region…</option>
+                            {% endif %}
+                            {% for region in queue_regions %}
+                            <option value="{{ region.slug }}"{% if region.pk == queue_default_region.pk %} selected{% endif %}>{{ region.long_name }}</option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">
+                            Each region keeps its own queue; this image is featured on that region's homepage.
+                            {% if not queue_default_region %}This image belongs to no region, so none is preselected.{% endif %}
+                        </div>
+                    </div>
                     <div class="mb-3">
                         <label for="featuredImageDay" class="form-label">Date <span class="text-muted">(optional)</span></label>
                         <input type="date" class="form-control" id="featuredImageDay" name="day">
-                        <div class="form-text">Leave blank to use the next open day in the queue. Choosing a date pins the image to that day.</div>
+                        <div class="form-text">Leave blank to use the next open day in that region's queue. Choosing a date pins the image to that day.</div>
                     </div>
                     <div class="mb-3">
                         <label for="featuredImageNote" class="form-label">Note <span class="text-muted">(optional)</span></label>
@@ -898,12 +940,19 @@
                             Publicly quote me for this note
                         </label>
                     </div>
+                    {% else %}
+                    <div class="alert alert-warning mb-0">
+                        <i class="fas fa-exclamation-triangle me-2"></i>No regions exist yet, so there is no queue to add this image to.
+                    </div>
+                    {% endif %}
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">{% if queue_regions %}Cancel{% else %}Close{% endif %}</button>
+                    {% if queue_regions %}
                     <button type="submit" class="btn btn-primary">
                         <i class="fas fa-calendar-day me-1"></i>Add to Queue
                     </button>
+                    {% endif %}
                 </div>
             </form>
         </div>

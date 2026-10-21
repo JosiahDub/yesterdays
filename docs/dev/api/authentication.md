@@ -61,7 +61,7 @@ Credentials are valid only on the instance that issued them.
 Send the user's browser to the authorization endpoint with the parameters below.
 
 ```
-GET https://yesterdays.maprva.org/oauth/authorize/
+GET https://yesterdays.today/oauth/authorize/
     ?response_type=code
     &client_id={CLIENT_ID}
     &redirect_uri={REDIRECT_URI}
@@ -95,8 +95,10 @@ The verifier is a 43–128 character random string from the unreserved-character
     import base64
     import hashlib
     import secrets
-    
-    verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()  # (1)!
+
+    verifier = (
+        base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
+    )  # (1)!
     challenge = (
         base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
         .rstrip(b"=")
@@ -182,6 +184,7 @@ Bind a one-shot HTTP server to `127.0.0.1` on an ephemeral port, register `http:
 
     result = {}
 
+
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -195,11 +198,12 @@ Bind a one-shot HTTP server to `127.0.0.1` on an ephemeral port, register `http:
         def log_message(self, *args):
             pass
 
+
     server = http.server.HTTPServer(("127.0.0.1", port), Handler)
     print(f"Listening on http://127.0.0.1:{port}/callback")
 
     # (2)!
-    
+
     server.handle_request()
     ```
 
@@ -251,7 +255,7 @@ In all cases, **verify the `state`** value matches the one you generated before 
 Exchange the authorization code at the token endpoint within 60 seconds.
 
 ```
-POST https://yesterdays.maprva.org/oauth/token/
+POST https://yesterdays.today/oauth/token/
 Content-Type: application/x-www-form-urlencoded
 ```
 
@@ -270,7 +274,7 @@ Parameters for the `authorization_code` grant:
 === "curl"
 
     ```bash
-    curl -X POST "https://yesterdays.maprva.org/oauth/token/" \
+    curl -X POST "https://yesterdays.today/oauth/token/" \
       -d grant_type=authorization_code \
       -d code="$CODE" \
       -d redirect_uri="http://127.0.0.1:$PORT/callback" \
@@ -284,7 +288,7 @@ Parameters for the `authorization_code` grant:
     import requests
 
     resp = requests.post(
-        "https://yesterdays.maprva.org/oauth/token/",
+        "https://yesterdays.today/oauth/token/",
         data={
             "grant_type": "authorization_code",
             "code": code,
@@ -301,7 +305,7 @@ Parameters for the `authorization_code` grant:
     ```r
     library(httr2)
 
-    resp <- request("https://yesterdays.maprva.org/oauth/token/") |>
+    resp <- request("https://yesterdays.today/oauth/token/") |>
       req_body_form(
         grant_type    = "authorization_code",
         code          = code,
@@ -316,7 +320,7 @@ Parameters for the `authorization_code` grant:
 ### Refresh token grant
 
 ```
-POST https://yesterdays.maprva.org/oauth/token/
+POST https://yesterdays.today/oauth/token/
 Content-Type: application/x-www-form-urlencoded
 ```
 
@@ -365,7 +369,7 @@ Inspect the current token:
 === "curl"
 
     ```bash
-    curl "https://yesterdays.maprva.org/api/v2/auth/me/" \
+    curl "https://yesterdays.today/api/v2/auth/me/" \
       -H "Authorization: Bearer $ACCESS_TOKEN"
     ```
 
@@ -375,7 +379,7 @@ Inspect the current token:
     import requests
 
     resp = requests.get(
-        "https://yesterdays.maprva.org/api/v2/auth/me/",
+        "https://yesterdays.today/api/v2/auth/me/",
         headers={"Authorization": f"Bearer {access_token}"},
     )
     me = resp.json()
@@ -386,7 +390,7 @@ Inspect the current token:
     ```r
     library(httr2)
 
-    resp <- request("https://yesterdays.maprva.org/api/v2/auth/me/") |>
+    resp <- request("https://yesterdays.today/api/v2/auth/me/") |>
       req_headers(Authorization = paste("Bearer", access_token)) |>
       req_perform()
     me <- resp_body_json(resp)
@@ -470,28 +474,33 @@ Exceeding a limit returns `429 Too Many Requests` with a `Retry-After` header.
     import socket
     import urllib.parse
     import webbrowser
-    
+
     import requests
-    
-    INSTANCE = "https://yesterdays.maprva.org"
+
+    INSTANCE = "https://yesterdays.today"
     CLIENT_ID = "your-public-client-id"
-    
+
     # 1. PKCE
-    verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()  # (1)!
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode()).digest()
-    ).rstrip(b"=").decode()  # (2)!
+    verifier = (
+        base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
+    )  # (1)!
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+        .rstrip(b"=")
+        .decode()
+    )  # (2)!
     state = secrets.token_urlsafe(16)  # (3)!
-    
+
     # 2. Loopback callback
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))  # (4)!
     port = sock.getsockname()[1]  # (5)!
     sock.close()  # (6)!
     redirect_uri = f"http://127.0.0.1:{port}/callback"
-    
+
     result = {}
-    
+
+
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)  # (7)!
@@ -499,42 +508,48 @@ Exceeding a limit returns `429 Too Many Requests` with a `Retry-After` header.
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"You may close this tab.")
-    
+
         def log_message(self, *args):  # (9)!
             pass
-    
+
+
     # 3. Open browser to /authorize
-    auth_url = f"{INSTANCE}/oauth/authorize/?" + urllib.parse.urlencode({  # (10)!
-        "response_type": "code",
-        "client_id": CLIENT_ID,
-        "redirect_uri": redirect_uri,
-        "scope": "read import",
-        "state": state,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-    })
+    auth_url = f"{INSTANCE}/oauth/authorize/?" + urllib.parse.urlencode(
+        {  # (10)!
+            "response_type": "code",
+            "client_id": CLIENT_ID,
+            "redirect_uri": redirect_uri,
+            "scope": "read import",
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+    )
     print(f"Opening {auth_url}")
     webbrowser.open(auth_url)  # (11)!
-    
+
     # 4. Wait for the redirect
     http.server.HTTPServer(("127.0.0.1", port), Handler).handle_request()  # (12)!
-    
+
     if result.get("state") != state:  # (13)!
         raise SystemExit("State mismatch — possible CSRF.")
     if "error" in result:
         raise SystemExit(f"Authorization failed: {result['error']}")
-    
+
     # 5. Exchange code for tokens
-    resp = requests.post(f"{INSTANCE}/oauth/token/", data={  # (14)!
-        "grant_type": "authorization_code",
-        "code": result["code"],
-        "redirect_uri": redirect_uri,
-        "client_id": CLIENT_ID,
-        "code_verifier": verifier,
-    })
+    resp = requests.post(
+        f"{INSTANCE}/oauth/token/",
+        data={  # (14)!
+            "grant_type": "authorization_code",
+            "code": result["code"],
+            "redirect_uri": redirect_uri,
+            "client_id": CLIENT_ID,
+            "code_verifier": verifier,
+        },
+    )
     resp.raise_for_status()  # (15)!
     tokens = resp.json()
-    
+
     # 6. Use the access token
     me = requests.get(  # (16)!
         f"{INSTANCE}/api/v2/auth/me/",
@@ -575,7 +590,7 @@ Exceeding a limit returns `429 Too Many Requests` with a `Retry-After` header.
     library(httpuv)
     library(httr2)
     
-    INSTANCE  <- "https://yesterdays.maprva.org"
+    INSTANCE  <- "https://yesterdays.today"
     CLIENT_ID <- "your-public-client-id"
     
     b64url <- function(x) {

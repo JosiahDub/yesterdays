@@ -29,6 +29,8 @@ from .browse import (
 )
 from .core import (
     add_comment,
+    bulk_mark_aerial,
+    bulk_mark_will_not_georef,
     get_min_scale_for_zoom,
     get_random_image,
     image_stats,
@@ -41,6 +43,13 @@ from .core import (
     skip_image,
     submit_rating,
     update_image_scale,
+)
+from .duplicates import (
+    dismiss_duplicate_pair,
+    duplicate_image_pairs,
+    duplicate_pair_detail,
+    resolve_duplicate_pair,
+    restore_duplicate_pair,
 )
 from .featured_image import (
     featured_image_delete,
@@ -58,6 +67,7 @@ from .georeference import (
 )
 from .search import (
     find_similar_images,
+    in_view_search,
     reverse_image_search,
     search_page,
     semantic_search,

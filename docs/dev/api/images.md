@@ -20,7 +20,7 @@ Use the `detail_url` field to fetch the full details for any image.
 === "curl"
 
     ```bash
-    curl "https://yesterdays.maprva.org/api/v2/images/"
+    curl "https://yesterdays.today/api/v2/images/"
     ```
 
 === "Python"
@@ -28,7 +28,7 @@ Use the `detail_url` field to fetch the full details for any image.
     ```python
     import requests
 
-    response = requests.get("https://yesterdays.maprva.org/api/v2/images/")
+    response = requests.get("https://yesterdays.today/api/v2/images/")
     data = response.json()
     ```
 
@@ -37,7 +37,7 @@ Use the `detail_url` field to fetch the full details for any image.
     ```r
     library(httr2)
 
-    resp <- request("https://yesterdays.maprva.org/api/v2/images/") |>
+    resp <- request("https://yesterdays.today/api/v2/images/") |>
       req_perform()
     data <- resp_body_json(resp)
     ```
@@ -47,7 +47,7 @@ Use the `detail_url` field to fetch the full details for any image.
 ```json
 {
     "count": 37244,
-    "next": "https://yesterdays.maprva.org/api/v2/images/?page=2",
+    "next": "https://yesterdays.today/api/v2/images/?page=2",
     "previous": null,
     "results": [
         {
@@ -66,7 +66,7 @@ Use the `detail_url` field to fetch the full details for any image.
                 "source_name": "The Valentine"
             },
             "georeference_status": "georeferenced",
-            "detail_url": "https://yesterdays.maprva.org/api/v2/images/5934/"
+            "detail_url": "https://yesterdays.today/api/v2/images/5934/"
         }
     ]
 }
@@ -93,9 +93,9 @@ Use the `detail_url` field to fetch the full details for any image.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `source` | integer | Filter by source ID |
-| `collection` | integer | Filter by collection ID |
-| `subject` | integer | Filter by subject ID |
+| `source` | string | Filter by one or more comma-separated source IDs, matching any listed source |
+| `collection` | string | Filter by one or more comma-separated collection IDs, matching any listed collection |
+| `subject` | string | Filter by one or more comma-separated subject database IDs or Wikidata Q-IDs, matching any listed subject (e.g., `22,Q5882648`) |
 | `creator` | string | Search creator name (case-insensitive, partial match) |
 | `year_min` | number | Include images whose date range overlaps with or follows this year |
 | `year_max` | number | Include images whose date range overlaps with or precedes this year |
@@ -109,7 +109,7 @@ Find all georeferenced images from the Valentine, taken between 1900 and 1920:
 === "curl"
 
     ```bash
-    curl "https://yesterdays.maprva.org/api/v2/images/?source=2&georeferenced=true&year_min=1900&year_max=1920"
+    curl "https://yesterdays.today/api/v2/images/?source=2&georeferenced=true&year_min=1900&year_max=1920"
     ```
 
 === "Python"
@@ -117,12 +117,15 @@ Find all georeferenced images from the Valentine, taken between 1900 and 1920:
     ```python
     import requests
 
-    response = requests.get("https://yesterdays.maprva.org/api/v2/images/", params={
-        "source": 2,
-        "georeferenced": "true",
-        "year_min": 1900,
-        "year_max": 1920,
-    })
+    response = requests.get(
+        "https://yesterdays.today/api/v2/images/",
+        params={
+            "source": 2,
+            "georeferenced": "true",
+            "year_min": 1900,
+            "year_max": 1920,
+        },
+    )
     data = response.json()
     ```
 
@@ -131,7 +134,7 @@ Find all georeferenced images from the Valentine, taken between 1900 and 1920:
     ```r
     library(httr2)
 
-    resp <- request("https://yesterdays.maprva.org/api/v2/images/") |>
+    resp <- request("https://yesterdays.today/api/v2/images/") |>
       req_url_query(source = 2, georeferenced = "true", year_min = 1900, year_max = 1920) |>
       req_perform()
     data <- resp_body_json(resp)
@@ -153,7 +156,7 @@ Prefix with `-` to sort descending. For example, `ordering=original_date` gives 
 
     ```bash
     # Most recently georeferenced images first
-    curl "https://yesterdays.maprva.org/api/v2/images/?ordering=-last_georeferenced_at"
+    curl "https://yesterdays.today/api/v2/images/?ordering=-last_georeferenced_at"
     ```
 
 === "Python"
@@ -162,9 +165,12 @@ Prefix with `-` to sort descending. For example, `ordering=original_date` gives 
     import requests
 
     # Most recently georeferenced images first
-    response = requests.get("https://yesterdays.maprva.org/api/v2/images/", params={
-        "ordering": "-last_georeferenced_at",
-    })
+    response = requests.get(
+        "https://yesterdays.today/api/v2/images/",
+        params={
+            "ordering": "-last_georeferenced_at",
+        },
+    )
     data = response.json()
     ```
 
@@ -174,7 +180,7 @@ Prefix with `-` to sort descending. For example, `ordering=original_date` gives 
     library(httr2)
 
     # Most recently georeferenced images first
-    resp <- request("https://yesterdays.maprva.org/api/v2/images/") |>
+    resp <- request("https://yesterdays.today/api/v2/images/") |>
       req_url_query(ordering = "-last_georeferenced_at") |>
       req_perform()
     data <- resp_body_json(resp)
@@ -196,7 +202,7 @@ Returns complete details for a single image, including its georeferences, subjec
 === "curl"
 
     ```bash
-    curl "https://yesterdays.maprva.org/api/v2/images/5934/"
+    curl "https://yesterdays.today/api/v2/images/5934/"
     ```
 
 === "Python"
@@ -204,7 +210,7 @@ Returns complete details for a single image, including its georeferences, subjec
     ```python
     import requests
 
-    response = requests.get("https://yesterdays.maprva.org/api/v2/images/5934/")
+    response = requests.get("https://yesterdays.today/api/v2/images/5934/")
     data = response.json()
     ```
 
@@ -213,7 +219,7 @@ Returns complete details for a single image, including its georeferences, subjec
     ```r
     library(httr2)
 
-    resp <- request("https://yesterdays.maprva.org/api/v2/images/5934/") |>
+    resp <- request("https://yesterdays.today/api/v2/images/5934/") |>
       req_perform()
     data <- resp_body_json(resp)
     ```
@@ -280,7 +286,7 @@ Returns complete details for a single image, including its georeferences, subjec
             "created_at": "2025-12-16T12:55:42Z"
         }
     ],
-    "detail_url": "https://yesterdays.maprva.org/api/v2/images/5934/",
+    "detail_url": "https://yesterdays.today/api/v2/images/5934/",
     "iiif_url": "https://cdn.maprva.org/images/5934/iiif/"
 }
 ```
@@ -423,7 +429,7 @@ Creates the `Image` row and moves the uploaded file to its permanent location.
 | `license_name`  | string  | no       | Exact `name` of a [recognized license](licenses.md). Unknown values are rejected. |
 | `rotation`      | integer | no       | Display rotation in degrees clockwise: `0`, `90`, `180`, or `270`. Default `0`. |
 | `mirror`        | string  | no       | Display mirror: `"none"`, `"h"`, or `"v"`. Default `"none"`. |
-| `subjects`      | array   | no       | List of [Subject](subjects.md) slugs to tag on the image, in the order given. Each must match an existing subject's `slug`; unknown slugs are rejected. Default `[]`. |
+| `subjects`      | array   | no       | List of [Subjects](subjects.md) to tag on the image, in the order given, each identified by its Wikidata Q-ID (e.g. `"Q5881191"`). Each must match an existing subject; unknown values are rejected. A subject's `slug` is also accepted, but slugs are not unique and one shared by several subjects is rejected, so prefer Q-IDs. Default `[]`. |
 
 The image bytes are uploaded as-is — `rotation` and `mirror` are stored as display metadata and applied at render time, not baked into the file. If you want the canonical bytes to be physically oriented, bake the transform in *before* uploading.
 
@@ -449,7 +455,8 @@ Example response (201 Created):
 | 400  | `license_name: License '...' is not recognized.`            | The provided license isn't in this instance's set — fetch [Licenses](licenses.md) for the allowed values. |
 | 400  | `edtf_date: Invalid EDTF date: ...`                         | The provided date doesn't parse as EDTF. |
 | 400  | `title: This field is required.`                            | A required field is missing or empty. |
-| 400  | `subjects: Object with slug=... does not exist.`            | One of the provided subject slugs doesn't match an existing subject. |
+| 400  | `subjects: Object with wikidata_id=... does not exist.`     | One of the provided Q-IDs doesn't match an existing subject (`slug=...` when a slug was given). |
+| 400  | `subjects: More than one subject has the slug ...; use its Wikidata Q-ID instead.` | The slug is shared by several subjects. |
 | 401  | `invalid_token`                                             | Access token missing, expired, or revoked. |
 | 403  | `insufficient_scope` / permission denied                    | Token lacks the `import` scope, or the user is not a contributor. |
 | 404  | `Import slot not found or does not belong to you.`          | Slot expired, doesn't exist, or was created by a different user. |
@@ -480,7 +487,7 @@ Example response:
 === "curl"
 
     ```bash
-    INSTANCE="https://yesterdays.maprva.org"
+    INSTANCE="https://yesterdays.today"
     TOKEN="your-access-token"
     COLLECTION_ID=39
     FILE=/path/to/photo.tif
@@ -523,7 +530,7 @@ Example response:
     ```python
     import requests
 
-    INSTANCE = "https://yesterdays.maprva.org"
+    INSTANCE = "https://yesterdays.today"
     TOKEN = "your-access-token"
     COLLECTION_ID = 39
     FILE = "/path/to/photo.tif"
@@ -573,7 +580,7 @@ Example response:
     ```r
     library(httr2)
 
-    INSTANCE      <- "https://yesterdays.maprva.org"
+    INSTANCE      <- "https://yesterdays.today"
     TOKEN         <- "your-access-token"
     COLLECTION_ID <- 39
     FILE          <- "/path/to/photo.tif"
@@ -690,8 +697,8 @@ Example response (200 OK):
 
 - `permalink` is updated to point at the newly uploaded file.
 - `rotation` and `mirror` reset to `0` and `"none"` — the uploaded file is treated as correctly oriented. Apply any rotation or mirroring *before* uploading.
-- `thumbnail` and any derived assets are cleared.
 - A background task regenerates the thumbnail, display variant, and IIIF tiles from the new source, and cleans up prior versions.
+- The image stays viewable throughout: `thumbnail`, the display variant, and the IIIF tiles keep serving the *previous* file until each replacement asset is ready, then swap over. Expect a few minutes of the old picture on a large scan.
 - The previous `images/{id}/original.*` file is deleted when the new file has a different extension.
 - The import slot is consumed (cannot be committed again).
 
@@ -711,7 +718,7 @@ Example response (200 OK):
 === "curl"
 
     ```bash
-    INSTANCE="https://yesterdays.maprva.org"
+    INSTANCE="https://yesterdays.today"
     TOKEN="your-access-token"
     IMAGE_ID=5934
     COLLECTION_ID=39
@@ -742,7 +749,7 @@ Example response (200 OK):
     ```python
     import requests
 
-    INSTANCE = "https://yesterdays.maprva.org"
+    INSTANCE = "https://yesterdays.today"
     TOKEN = "your-access-token"
     IMAGE_ID = 5934
     COLLECTION_ID = 39
@@ -782,7 +789,7 @@ Example response (200 OK):
     ```r
     library(httr2)
 
-    INSTANCE      <- "https://yesterdays.maprva.org"
+    INSTANCE      <- "https://yesterdays.today"
     TOKEN         <- "your-access-token"
     IMAGE_ID      <- 5934
     COLLECTION_ID <- 39

@@ -5,6 +5,15 @@ import "../../styles/components/autocomplete.css";
 import "../../styles/components/subject-cards.css";
 
 /**
+ * Escape HTML to prevent XSS
+ */
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+/**
  * Initialize the subject editor component
  * Reads configuration from data attributes on #subject-editor element
  */
@@ -259,24 +268,45 @@ export function initSubjectEditor() {
         keys: ["title"],
         cache: false,
       },
+      // The list scrolls (see autocomplete.css), so show the server's full page.
+      resultsList: {
+        maxResults: 15,
+      },
       resultItem: {
-        highlight: true,
         element: (item, data) => {
           item.style =
             "display: flex; justify-content: space-between; align-items: center;";
           let description = data.value.description
             ? data.value.description.substring(0, 40) + "..."
             : "";
+          // Set when the query hit a Wikidata alias rather than the title.
+          const alias = data.value.matched_alias
+            ? ` <small class="text-muted">aka ${escapeHtml(data.value.matched_alias)}</small>`
+            : "";
           item.innerHTML = `
             <span style="text-overflow: ellipsis; white-space: nowrap; overflow: hidden;">
-                ${data.match} <small class="text-muted ms-2">${description}</small>
+                ${data.match}${alias} <small class="text-muted ms-2">${description}</small>
             </span>
-            <span style="display: flex; align-items: center; font-size: 13px; font-weight: 100; text-transform: uppercase; color: rgba(0,0,0,.5);">
+            <span class="text-muted" style="display: flex; align-items: center; font-size: 13px; font-weight: 100; text-transform: uppercase;">
                 ${data.value.wikidata_id || ""}
             </span>`;
         },
       },
       threshold: 2,
+      // The server does the (fuzzy) filtering and ranking; never drop or
+      // reorder results client-side. <mark> literal substring hits;
+      // typo-only hits render as plain text.
+      searchEngine: (query, record) => {
+        const idx = record.toLowerCase().indexOf(query.toLowerCase());
+        if (idx === -1) return record;
+        return (
+          record.slice(0, idx) +
+          "<mark>" +
+          record.slice(idx, idx + query.length) +
+          "</mark>" +
+          record.slice(idx + query.length)
+        );
+      },
       events: {
         input: {
           selection: (event) => {

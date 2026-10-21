@@ -21,7 +21,7 @@ RUN apt-get -y update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # Install Bun from official image
-COPY --from=oven/bun:1.3.5 /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=oven/bun:1.3.14 /usr/local/bin/bun /usr/local/bin/bun
 
 # Install Bun dependencies (including devDependencies for vite build)
 COPY package.json bun.lock ./
@@ -39,26 +39,33 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
 # understood by BuildKit.
 COPY uv.lock pyproject.toml ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-install-project
+    uv sync --locked --no-install-project --no-default-groups
 
 # Copy project files - only what's needed for the application
 COPY uv.lock ./
 COPY manage.py ./
 COPY vite.config.js ./
+COPY tsconfig.json ./
 COPY pyproject.toml ./
 COPY assets ./assets
+
+# Type-check frontend sources before anything heavier runs
+RUN bun run typecheck
+
 COPY api ./api
 COPY images ./images
 COPY directories ./directories
 COPY maps ./maps
+COPY regions ./regions
 COPY subjects ./subjects
 COPY activity ./activity
 COPY osm_auth ./osm_auth
 COPY templates ./templates
 COPY yesterdays ./yesterdays
 
-# Install project itself
-RUN uv sync --locked
+# Install project itself (--no-default-groups keeps the docs toolchain out of
+# the venv that ships in the release image)
+RUN uv sync --locked --no-default-groups
 
 # Build static files in correct order:
 # 1. Create static directory first
@@ -75,9 +82,8 @@ RUN bun run build
 FROM build AS dev
 
 # Runtime libraries the build stage only carried the compile-time (-dev)
-# variants of, or didn't install at all (libvips for pyvips, tesseract for OCR).
+# variants of, or didn't install at all (tesseract for OCR).
 RUN apt-get -y update && apt-get install -y --no-install-recommends \
-    libvips42 \
     tesseract-ocr \
     tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
@@ -103,7 +109,6 @@ WORKDIR /app
 RUN apt-get -y update && apt-get install -y --no-install-recommends \
     libgdal32 \
     libproj25 \
-    libvips42 \
     tesseract-ocr \
     tesseract-ocr-eng \
     ca-certificates \
@@ -122,6 +127,7 @@ COPY --from=build --chown=app:app /app/api /app/api
 COPY --from=build --chown=app:app /app/images /app/images
 COPY --from=build --chown=app:app /app/directories /app/directories
 COPY --from=build --chown=app:app /app/maps /app/maps
+COPY --from=build --chown=app:app /app/regions /app/regions
 COPY --from=build --chown=app:app /app/subjects /app/subjects
 COPY --from=build --chown=app:app /app/activity /app/activity
 COPY --from=build --chown=app:app /app/osm_auth /app/osm_auth

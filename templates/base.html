@@ -11,10 +11,12 @@
     {% block opengraph %}{% endblock %}
     <script>
         // Global map configuration
-        window.OSM_STYLE_URL = "{{ osm_style_url }}";
         window.DEFAULT_MAP_CENTER = {{ default_map_center }};
         window.DEFAULT_MAP_ZOOM = {{ default_map_zoom }};
         window.DEFAULT_SEARCH_BBOX = {{ default_search_bbox }};
+        window.REGION_MAP_CENTER = {% if region_map_center %}{{ region_map_center }}{% else %}null{% endif %};
+        window.REGION_MAP_BOUNDS = {% if region_map_bounds %}{{ region_map_bounds }}{% else %}null{% endif %};
+        window.SEARCH_BBOX = {% if region_search_bbox %}{{ region_search_bbox }}{% else %}{{ default_search_bbox }}{% endif %};
         window.ADMIN_EMAIL = {% if admin_email %}"{{ admin_email }}"{% else %}null{% endif %};
         window.MAP_LAYERS_DATA = {{ map_layers_json|safe }};
     </script>
@@ -54,7 +56,7 @@
                         <a class="nav-link" href="{% url 'images:search_page' %}">Search</a>
                     </li>
                     <li>
-                        <a class="nav-link" href="https://docs.yesterdays.maprva.org">Docs</a>
+                        <a class="nav-link" href="https://docs.yesterdays.today">Docs</a>
                     </li>
                     <li class="nav-item dropdown">
                         <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
@@ -73,11 +75,25 @@
                     {% if user.is_staff %}
                     <li class="nav-item dropdown">
                         <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
-                            Admin
+                            <span class="position-relative">
+                                Admin
+                                {% if featured_queue_badge_class %}
+                                {# Bootstrap notification dot: flags a low featured-image queue #}
+                                <span class="position-absolute top-0 start-100 translate-middle p-1 {{ featured_queue_badge_class }} border border-light rounded-circle">
+                                    <span class="visually-hidden">Featured image queue is running low</span>
+                                </span>
+                                {% endif %}
+                            </span>
                         </a>
                         <ul class="dropdown-menu">
                             <li><a class="dropdown-item" href="{% url 'images:validation_queue' %}">Validation Queue</a></li>
-                            <li><a class="dropdown-item" href="{% url 'images:featured_image_queue' %}">Featured Image Queue</a></li>
+                            <li><a class="dropdown-item d-flex align-items-center justify-content-between" href="{% url 'images:featured_image_queue' %}">
+                                Featured Image Queue
+                                {% if featured_queue_badge_class %}
+                                <span class="badge rounded-pill {{ featured_queue_badge_class }} ms-2" title="{{ featured_queue_days }} next day{{ featured_queue_days|pluralize }} queued">{{ featured_queue_days }}</span>
+                                {% endif %}
+                            </a></li>
+                            <li><a class="dropdown-item" href="{% url 'images:duplicate_image_pairs' %}">Possible Duplicates</a></li>
                             <li><a class="dropdown-item" href="{% url 'admin:index' %}">Admin Panel</a></li>
                         </ul>
                     </li>
@@ -85,6 +101,16 @@
                 </ul>
 
                 <ul class="navbar-nav ms-auto">
+                    {% include "regions/partials/region_selector.html" %}
+
+                    {# Decorative separator between the region selector and the account #}
+                    {# menu. Vertical at -lg; the collapsed navbar stacks vertically, so #}
+                    {# swap in a horizontal rule there.                                  #}
+                    <li class="nav-item d-lg-flex align-items-center" aria-hidden="true">
+                        <div class="vr d-none d-lg-block mx-2 my-2 text-white opacity-50"></div>
+                        <hr class="d-lg-none my-2 text-white opacity-50">
+                    </li>
+
                     {% if request.session.is_authenticated %}
                         <li class="nav-item dropdown">
                             <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">

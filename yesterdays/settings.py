@@ -6,6 +6,8 @@ import os
 import re
 from pathlib import Path
 
+from celery.schedules import crontab
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -70,17 +72,81 @@ DIRECTORIES_ENABLED = os.getenv("DIRECTORIES_ENABLED", "True").lower() in (
     "yes",
 )
 
-# CLIP model warmup on startup (disabled by default)
-CLIP_WARMUP_ENABLED = os.getenv("CLIP_WARMUP_ENABLED", "False").lower() in (
-    "true",
-    "1",
-    "yes",
-)
+# CLIP embedding microservice (services/clip). Semantic search and embedding
+# generation post images/text to this service over HTTP; it is required for
+# those features to work.
+CLIP_SERVICE_URL = os.getenv("CLIP_SERVICE_URL", "").rstrip("/")
+# The vision tower encodes serially and a single CPU-only encode of
+# a ViT-L/14@336px model takes several seconds.
+CLIP_SERVICE_TIMEOUT = float(os.getenv("CLIP_SERVICE_TIMEOUT", "30"))
+
+# The embedding model behind every vector in Image.embedding. Fixed in code,
+# not env: the HNSW indexes are built on embedding::vector(EMBEDDING_DIMENSION)
+# (images/migrations/0069_pe_core_embeddings.py), and images.clip_client
+# rejects service responses from any other model so vectors never mix.
+EMBEDDING_MODEL_ID = "PE-Core-L-14-336"
+EMBEDDING_DIMENSION = 1024
 
 # pgvector HNSW search depth. Sets the per-query hnsw.ef_search parameter and
 # also caps how deep semantic-search pagination can go (the index can only rank
 # this many candidates per query). pgvector hard-caps ef_search at 1000.
 HNSW_EF_SEARCH = int(os.getenv("HNSW_EF_SEARCH", "1000"))
+
+# Upper bound on index tuples a pgvector iterative scan (hnsw.iterative_scan)
+# visits while filling a filtered query, e.g. similar images scoped to a
+# region. pgvector's default of 20000 is below the corpus size, which would let
+# the scan give up before reaching a small region's matches.
+HNSW_MAX_SCAN_TUPLES = int(os.getenv("HNSW_MAX_SCAN_TUPLES", "100000"))
+
+# Subject "find similar images" query construction (subjects/similarity.py).
+# Shrinkage strength toward the corpus mean for small collections' means:
+# mu_c = (n * mean_c + n0 * mu_corpus) / (n + n0)
+SUBJECT_SIMILARITY_SHRINKAGE_N0 = int(
+    os.getenv("SUBJECT_SIMILARITY_SHRINKAGE_N0", "20")
+)
+# Cosine similarity above which two set images count as near-duplicates
+# (multiple scans/prints of one photo) and only the first is kept. Calibrated
+# for PE-Core: CLIP's 0.97 maps to 0.9695-0.9703 (yesterdays-embedding-eval
+# RESULTS.md, "Threshold calibration"), so it stays.
+SUBJECT_SIMILARITY_DEDUPE_COSINE = float(
+    os.getenv("SUBJECT_SIMILARITY_DEDUPE_COSINE", "0.97")
+)
+# Collection balancing: each set image is weighted by n_c ** (exponent - 1),
+# where n_c is how many of the subject's kept images share its collection, so
+# a collection's total say grows as n_c ** exponent. 1.0 is a plain average;
+# 0.5 stops one big collection from dominating the query.
+SUBJECT_SIMILARITY_COLLECTION_EXPONENT = float(
+    os.getenv("SUBJECT_SIMILARITY_COLLECTION_EXPONENT", "0.5")
+)
+
+# Nightly visual-duplicate scan (images.tasks.refresh_duplicate_image_pairs).
+# How many of the globally closest embedding pairs to store for staff review,
+# how many neighbors to examine per image, and the HNSW search depth used for
+# the scan (lower than HNSW_EF_SEARCH since we only need the very nearest).
+DUPLICATE_PAIRS_COUNT = int(os.getenv("DUPLICATE_PAIRS_COUNT", "100"))
+DUPLICATE_PAIRS_NEIGHBORS = int(os.getenv("DUPLICATE_PAIRS_NEIGHBORS", "5"))
+DUPLICATE_PAIRS_EF_SEARCH = int(os.getenv("DUPLICATE_PAIRS_EF_SEARCH", "200"))
+DUPLICATE_PAIRS_BATCH_SIZE = int(os.getenv("DUPLICATE_PAIRS_BATCH_SIZE", "500"))
+# Hour (0-23, in CELERY_TIMEZONE) at which the nightly duplicate scan runs
+DUPLICATE_PAIRS_SCAN_HOUR = int(os.getenv("DUPLICATE_PAIRS_SCAN_HOUR", "4"))
+
+# Badge colours on the staff duplicate-pair pages: green below HIGH, amber
+# below MEDIUM (cosine distance). Like the "% match" badges below, quantile-
+# mapped from CLIP's 0.02/0.04 to PE-Core on the production corpus
+# (yesterdays-embedding-eval RESULTS.md, "Threshold calibration").
+DUPLICATE_DISTANCE_BADGE_HIGH = float(
+    os.getenv("DUPLICATE_DISTANCE_BADGE_HIGH", "0.021")
+)
+DUPLICATE_DISTANCE_BADGE_MEDIUM = float(
+    os.getenv("DUPLICATE_DISTANCE_BADGE_MEDIUM", "0.045")
+)
+# "% match" badge on semantic and reverse image search results (score =
+# cosine similarity x 100): green above HIGH, amber above MEDIUM. Calibrated on
+# image-to-image scores (CLIP's 80/60); text-to-image scores sit far below
+# both (top results ~0.27-0.44 for either model), so text queries stay grey.
+# Trigram text search keeps its own fixed 80/60.
+SEARCH_MATCH_BADGE_HIGH = int(os.getenv("SEARCH_MATCH_BADGE_HIGH", "74"))
+SEARCH_MATCH_BADGE_MEDIUM = int(os.getenv("SEARCH_MATCH_BADGE_MEDIUM", "53"))
 
 # Application definition
 
@@ -92,6 +158,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "django.contrib.gis",
+    "django.contrib.humanize",
     "django.contrib.postgres",
     "rest_framework",
     "rest_framework_gis",
@@ -104,6 +171,7 @@ INSTALLED_APPS = [
     "api",
     "osm_auth",
     "subjects",
+    "regions",
     "images",
     "maps",
     "activity",
@@ -153,6 +221,8 @@ TEMPLATES = [
                 "django.contrib.messages.context_processors.messages",
                 "osm_auth.context_processors.osm_auth",
                 "images.context_processors.site_settings",
+                "images.context_processors.featured_image_queue_alert",
+                "regions.context_processors.current_region",
             ],
         },
     },
@@ -189,6 +259,11 @@ CACHES = {
         "LOCATION": "default",
     },
 }
+
+# Layer discovery overzooms this coarse tileset; per-layer min_zoom is checked
+# in the browser. Tile responses are cached by browsers and configured CDNs.
+MAP_LAYER_TILE_MAX_ZOOM = 9
+MAP_LAYER_TILE_CACHE_SECONDS = int(os.getenv("MAP_LAYER_TILE_CACHE_SECONDS", "3600"))
 
 # Read database password from mounted secret if available
 db_password_file = os.getenv("DB_PASSWORD_FILE", "/etc/georef-db/password")
@@ -313,9 +388,11 @@ CELERY_TASK_ROUTES = {
     "images.tasks.cleanup_old_image_assets": {"queue": "background"},
     "images.tasks.cleanup_stale_import_slots": {"queue": "background"},
     "images.tasks.reconcile_collection_stats": {"queue": "background"},
-    # CLIP encoding tasks go to urgent queue (latency-sensitive, user-facing)
-    "images.tasks.encode_text": {"queue": "urgent"},
-    "images.tasks.encode_image": {"queue": "urgent"},
+    "images.tasks.reconcile_collection_region_stats": {"queue": "background"},
+    "images.tasks.refresh_collection_embedding_stats": {"queue": "background"},
+    "images.tasks.refresh_next_collection_embedding_stats": {"queue": "background"},
+    "images.tasks.generate_embeddings_batch": {"queue": "background"},
+    "images.tasks.refresh_duplicate_image_pairs": {"queue": "background"},
     # First-time Wikidata closure hydration fires off a request thread
     # right after a new WikidataItem is saved; the user is waiting on the
     # subject to populate, so this one stays on the urgent queue.
@@ -358,6 +435,11 @@ CELERY_TASK_QUEUES = {
     },
 }
 
+# Celery Beat evaluates crontab schedules in this timezone. It defaults to UTC
+# via TIME_ZONE; interval (seconds) schedules are timezone-independent, so this
+# only affects crontab entries like the nightly duplicate scan.
+CELERY_TIMEZONE = TIME_ZONE
+
 # Celery Beat schedule for periodic tasks
 # Rate limiting is achieved by Beat's schedule interval, not per-worker limits
 # Tasks expire shortly before the next one is scheduled to prevent backlog buildup
@@ -380,6 +462,26 @@ CELERY_BEAT_SCHEDULE = {
         "task": "images.tasks.reconcile_collection_stats",
         "schedule": 3600.0,  # every hour; signals keep stats current in real time
     },
+    "reconcile-collection-region-stats": {
+        "task": "images.tasks.reconcile_collection_region_stats",
+        # Also hourly, but on the half hour rather than a float interval, so
+        # the two heaviest full-table aggregates don't both fire off the same
+        # beat-startup instant
+        "schedule": crontab(minute=30),
+    },
+    "refresh-next-collection-embedding-stats": {
+        "task": "images.tasks.refresh_next_collection_embedding_stats",
+        "schedule": 600.0,  # every 10 minutes: top up the most stale collection
+    },
+    "refresh-collection-embedding-stats": {
+        "task": "images.tasks.refresh_collection_embedding_stats",
+        "schedule": 86400.0,  # daily reconcile for count-neutral changes
+    },
+    "refresh-duplicate-image-pairs": {
+        "task": "images.tasks.refresh_duplicate_image_pairs",
+        # Nightly at DUPLICATE_PAIRS_SCAN_HOUR (in CELERY_TIMEZONE)
+        "schedule": crontab(hour=DUPLICATE_PAIRS_SCAN_HOUR, minute=0),
+    },
     "reconcile-project-graph": {
         "task": "subjects.tasks.reconcile_project_graph",
         "schedule": 21600.0,  # every 6 hours
@@ -395,15 +497,37 @@ METADATA_REFRESH_MAX_FAILURES = int(os.getenv("METADATA_REFRESH_MAX_FAILURES", "
 # Postpass API settings for OSM geometry fetching
 METADATA_REFRESH_POSTPASS_URL = os.getenv(
     "METADATA_REFRESH_POSTPASS_URL",
-    "https://postpass.geofabrik.de/api/0.2/interpreter",
+    "https://postpass.geofabrik.de/api/interpreter",
 )
 METADATA_REFRESH_POSTPASS_TIMEOUT = int(
     os.getenv("METADATA_REFRESH_POSTPASS_TIMEOUT", "60")
 )
+# Most OSM elements accepted for one Wikidata item. Larger matches are refused
+# outright rather than imported in part, since a partial result would make
+# the omitted elements look stale
+METADATA_REFRESH_POSTPASS_MAX_FEATURES = int(
+    os.getenv("METADATA_REFRESH_POSTPASS_MAX_FEATURES", "100")
+)
 
-# Oxigraph SPARQL store for the Wikidata subject mirror
-OXIGRAPH_URL = os.getenv("OXIGRAPH_URL", "http://localhost:7878")
-OXIGRAPH_TIMEOUT = int(os.getenv("OXIGRAPH_TIMEOUT", "60"))
+# Memgraph property-graph store (Bolt) for the Wikidata subject mirror
+MEMGRAPH_URL = os.getenv("MEMGRAPH_URL", "bolt://localhost:7687")
+MEMGRAPH_TIMEOUT = int(os.getenv("MEMGRAPH_TIMEOUT", "60"))
+
+# How long the subjects-map info panel's JSON responses may be cached.
+SUBJECT_MAP_INFO_CACHE_SECONDS = int(os.getenv("SUBJECT_MAP_INFO_CACHE_SECONDS", "300"))
+# Below this zoom the subjects map requests no OSM element tiles: outlines
+# aren't legible there, and a low-zoom tile would sweep the whole table.
+SUBJECT_MAP_MIN_ZOOM = int(os.getenv("SUBJECT_MAP_MIN_ZOOM", "6"))
+# Edge-cache lifetime for OSM element tiles; browsers always revalidate.
+SUBJECT_MAP_TILE_CACHE_SECONDS = int(os.getenv("SUBJECT_MAP_TILE_CACHE_SECONDS", "300"))
+
+# Languages whose literals the Wikidata mirror keeps (comma-separated BCP47
+# tags).
+WIKIDATA_MIRROR_LANGUAGES = [
+    lang.strip()
+    for lang in os.getenv("WIKIDATA_MIRROR_LANGUAGES", "en,mul").split(",")
+    if lang.strip()
+]
 
 # OSM Authentication Settings
 OSM_URL = os.getenv("OSM_URL", "https://www.openstreetmap.org")
@@ -459,11 +583,6 @@ OPENROUTER_DEFAULT_MODEL = os.getenv("OPENROUTER_DEFAULT_MODEL", "")
 # Protomaps API key for map tiles
 PROTOMAPS_API_KEY = os.getenv("PROTOMAPS_API_KEY")
 
-# MapLibre style URL for OSM base map
-OSM_STYLE_URL = os.getenv(
-    "OSM_STYLE_URL", "https://styles.maprva.org/openmaptiles-osm.json"
-)
-
 # Activity Feed Settings
 # Milestone thresholds for user georeference achievements
 ACTIVITY_MILESTONE_THRESHOLDS = [
@@ -513,6 +632,72 @@ ACTIVITY_SITEWIDE_MILESTONE_THRESHOLDS = [
     20000,
 ]
 
+# ---------------------------------------------------------------------------
+# Community write endpoints
+# ---------------------------------------------------------------------------
+# Input limits applied by images.validation to every session-authenticated
+# mutation endpoint (georeferences, validations, comments, ratings, skips,
+# subject tagging, album membership). They bound what a single request can
+# cost us, so they are deliberately generous for humans and tight for scripts.
+
+# Maximum accepted request body, in bytes, for JSON mutation endpoints. Read
+# before json.loads so an oversized body is rejected without being parsed.
+COMMUNITY_WRITE_MAX_BODY_BYTES = int(
+    os.getenv("COMMUNITY_WRITE_MAX_BODY_BYTES", str(64 * 1024))
+)
+# Polygon submissions carry a whole ring of coordinates, so they get their own,
+# larger body budget.
+POLYGON_MAX_BODY_BYTES = int(os.getenv("POLYGON_MAX_BODY_BYTES", str(256 * 1024)))
+
+# Maximum lengths for free-text fields written by community endpoints.
+COMMENT_MAX_LENGTH = int(os.getenv("COMMENT_MAX_LENGTH", "10000"))
+GEOREFERENCE_NOTES_MAX_LENGTH = int(os.getenv("GEOREFERENCE_NOTES_MAX_LENGTH", "2000"))
+VALIDATION_NOTES_MAX_LENGTH = int(os.getenv("VALIDATION_NOTES_MAX_LENGTH", "2000"))
+SKIP_REASON_MAX_LENGTH = int(os.getenv("SKIP_REASON_MAX_LENGTH", "500"))
+
+# Album metadata. The title cap matches Album.title's max_length so the API and
+# the HTML edit form agree.
+ALBUM_TITLE_MAX_LENGTH = int(os.getenv("ALBUM_TITLE_MAX_LENGTH", "500"))
+ALBUM_DESCRIPTION_MAX_LENGTH = int(os.getenv("ALBUM_DESCRIPTION_MAX_LENGTH", "10000"))
+
+# Maximum number of image IDs accepted by a single bulk request.
+BULK_MAX_IMAGE_IDS = int(os.getenv("BULK_MAX_IMAGE_IDS", "500"))
+
+# Polygon georeference geometry limits, checked structurally on the GeoJSON
+# before any GEOS parsing or database work happens.
+POLYGON_MAX_RINGS = int(os.getenv("POLYGON_MAX_RINGS", "16"))
+POLYGON_MAX_VERTICES_PER_RING = int(os.getenv("POLYGON_MAX_VERTICES_PER_RING", "2000"))
+POLYGON_MAX_TOTAL_VERTICES = int(os.getenv("POLYGON_MAX_TOTAL_VERTICES", "4000"))
+# Area ceiling in square degrees. An aerial photograph covers a neighbourhood,
+# not a continent; 0.25 sq deg is roughly a 55 km by 43 km box at this
+# latitude, which is far larger than any legitimate submission.
+POLYGON_MAX_AREA_SQ_DEGREES = float(os.getenv("POLYGON_MAX_AREA_SQ_DEGREES", "0.25"))
+
+# ---------------------------------------------------------------------------
+# In-view (coordinate) search
+# ---------------------------------------------------------------------------
+# Bounds for images.in_view, which walks the georeference GiST index outward
+# from a coordinate until it has enough results.
+
+# Ceiling on offset + page_size. This is the safety bound that stands in for a
+# mandatory radius: without it, a coordinate in the middle of the ocean plus a
+# deep page would walk a large slice of the index.
+IN_VIEW_SEARCH_MAX_RESULTS = int(os.getenv("IN_VIEW_SEARCH_MAX_RESULTS", "1000"))
+
+# Largest accepted radius, in metres. A larger one is clamped to this rather
+# than rejected, since the radius is only ever an extra bound.
+IN_VIEW_SEARCH_MAX_RADIUS_M = float(os.getenv("IN_VIEW_SEARCH_MAX_RADIUS_M", "50000"))
+
+# How wide a cone, in degrees, a photograph has to point through to count as a
+# photograph *of* the searched coordinate. Half of it falls either side of the
+# georeference's recorded direction. Proximity alone is not enough: a camera
+# 50 m away facing the other way is not a picture of the spot. Georeferences
+# with no recorded direction are always included. Setting this to 360 admits
+# every direction, which turns the filter off.
+IN_VIEW_SEARCH_DIRECTION_SWEEP_DEGREES = float(
+    os.getenv("IN_VIEW_SEARCH_DIRECTION_SWEEP_DEGREES", "40")
+)
+
 # Django REST Framework
 REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "api.pagination.DefaultPagination",
@@ -553,6 +738,24 @@ OAUTH2_PROVIDER = {
     "REFRESH_TOKEN_GRACE_PERIOD_SECONDS": 30,
     "PKCE_REQUIRED": True,
     "ALLOWED_REDIRECT_URI_SCHEMES": ["http", "https"],
+    # RFC 8414 discovery document (/.well-known/oauth-authorization-server).
+    # DOT's defaults advertise everything it *can* do; these narrow the document
+    # to what this server actually accepts. Applications are registered with the
+    # authorization-code grant only (see api/views.register_app_view), so the
+    # implicit, password, client-credentials, and device-code grants never apply.
+    "OAUTH2_GRANT_TYPES_SUPPORTED": ["authorization_code", "refresh_token"],
+    "OAUTH2_RESPONSE_TYPES_SUPPORTED": ["code"],
+    # Public clients authenticate at /oauth/token/ with PKCE and no secret,
+    # which RFC 8414 spells as the "none" auth method; DOT's default omits it.
+    "OAUTH2_TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED": [
+        "client_secret_post",
+        "client_secret_basic",
+        "none",
+    ],
+    # S256OnlyAuthorizationView already rejects code_challenge_method=plain at
+    # /oauth/authorize/. Enabling the gate makes the validator reject it too and
+    # keeps "plain" out of code_challenge_methods_supported.
+    "COMPLIANT_BCP_RFC9700_PKCE_METHOD": True,
 }
 
 # drf-spectacular (OpenAPI schema generation)

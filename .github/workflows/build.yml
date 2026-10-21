@@ -12,9 +12,27 @@ env:
   REGISTRY_PASSWORD: ${{ github.token }}
 
 jobs:
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Keep in lockstep with the oven/bun COPY in the Containerfile
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type-check
+        run: bun run typecheck
   build:
     name: Build Image
     runs-on: ubuntu-latest
+    needs: typecheck
 
     steps:
       - uses: actions/checkout@v6
@@ -26,18 +44,36 @@ jobs:
       - name: Check outputs
         run: echo ${{ steps.vars.outputs.sha_short }}
 
+      # Log in before the build so --cache-to can push cache layers to ghcr.
+      - name: Log in to registry
+        uses: redhat-actions/podman-login@v2
+        with:
+          registry: ${{ env.IMAGE_REGISTRY }}
+          username: ${{ env.REGISTRY_USER }}
+          password: ${{ env.REGISTRY_PASSWORD }}
+
+      # layers + a registry-backed cache keep unchanged build steps (apt,
+      # torch/uv sync) byte-identical across runs, so pushes and deploy pulls
+      # only transfer the layers that actually changed.
       - name: Buildah Action
         id: build_image
-        uses: redhat-actions/buildah-build@v2
+        uses: redhat-actions/buildah-build@v3
         with:
           image: ${{ env.IMAGE_NAME }}
           tags: ${{ steps.vars.outputs.sha_short }} ${{ github.ref_name }}
+          layers: true
+          # v3 defaults to squash: true, which would collapse everything into one
+          # layer and defeat the per-layer reuse above.
+          squash: false
+          extra-args: |
+            --cache-from ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}-cache
+            --cache-to ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}-cache
           containerfiles: |
             ./Containerfile
 
       - name: Push Image
         id: push
-        uses: redhat-actions/push-to-registry@v2
+        uses: redhat-actions/push-to-registry@v3
         with:
           image: ${{ steps.build_image.outputs.image }}
           tags: ${{ steps.build_image.outputs.tags }}

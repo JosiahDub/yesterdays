@@ -13,6 +13,34 @@ from django.utils.text import slugify
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from images.policies import representable_images
+
+
+def _first_time_claim(claims, pid):
+    """Return the first CE date of entity-JSON claim ``pid`` as ``YYYY-MM-DD``.
+
+    Wikidata time literals look like ``"+1895-01-01T00:00:00Z"``; the
+    leading sign is a BCE marker, so ``-`` values are skipped rather than
+    misparsed. Returns ``None`` when the property is absent or carries no
+    usable value.
+    """
+    for claim in claims.get(pid, []):
+        if claim.get("mainsnak", {}).get("snaktype") != "value":
+            continue
+        time_data = claim["mainsnak"]["datavalue"]["value"]
+        if "time" in time_data and time_data["time"].startswith("+"):
+            return time_data["time"][1:11]
+    return None
+
+
+def _preferred_wikidata_label(labels):
+    """Return the English label, falling back to Wikidata's ``mul`` label."""
+    for language in ("en", "mul"):
+        value = labels.get(language, {}).get("value", "")
+        if value:
+            return value
+    return ""
+
 
 class WikidataItem(models.Model):
     """Wikidata item with cached metadata"""
@@ -39,6 +67,11 @@ class WikidataItem(models.Model):
     inception = models.DateField(
         null=True, blank=True, help_text="Date of construction/inception"
     )
+    demolished = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Date of demolition/dissolution (Wikidata P576)",
+    )
     last_updated = models.DateTimeField(
         auto_now=True, help_text="When this row was last modified"
     )
@@ -55,9 +88,9 @@ class WikidataItem(models.Model):
         help_text="Consecutive fetch failures (resets on success)",
     )
 
-    # SPARQL mirror tracking - separate cadence from the JSON metadata fetch
-    # above. Populated when we load this entity's RDF into its Oxigraph named
-    # graph.
+    # WDQS mirror tracking - separate cadence from the JSON metadata fetch
+    # above. Populated when we load this entity's closure (fetched from
+    # WDQS via SPARQL) into the Memgraph mirror.
     sparql_last_loaded_at = models.DateTimeField(
         null=True,
         blank=True,
@@ -66,6 +99,15 @@ class WikidataItem(models.Model):
     sparql_fetch_failures = models.PositiveIntegerField(
         default=0,
         help_text="Consecutive SPARQL mirror load failures (resets on success)",
+    )
+    sparql_refresh_requested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Set when an admin manually queues this item, moving it to the "
+            "front of the Beat-driven refresh rotation. Cleared when the "
+            "refresh is picked up."
+        ),
     )
     discovered_via = models.ForeignKey(
         "Subject",
@@ -87,6 +129,25 @@ class WikidataItem(models.Model):
     def wikidata_url(self):
         """Generate Wikidata URL from ID"""
         return f"https://www.wikidata.org/wiki/{self.wikidata_id}"
+
+    @property
+    def date_range(self):
+        """Render ``inception``/``demolished`` as a display year range.
+
+        Yields ``"1901–1910"``, an open-ended ``"1950–"`` when the subject
+        was never demolished (or the date is unknown), ``"?–1910"`` when
+        only the end is known, and ``""`` when neither date is set.
+
+        Years only: neither write path records Wikidata's
+        ``timePrecision``, so a year-precision claim is indistinguishable
+        from a real January 1st and anything finer would invent precision
+        we don't have.
+        """
+        if not self.inception and not self.demolished:
+            return ""
+        start = self.inception.year if self.inception else "?"
+        end = self.demolished.year if self.demolished else ""
+        return f"{start}–{end}"
 
     def _fetch_wikidata_info(self):
         """Internal method to fetch and parse data from Wikidata API."""
@@ -119,7 +180,7 @@ class WikidataItem(models.Model):
             if not entity or "missing" in entity:
                 return None
 
-            title = entity.get("labels", {}).get("en", {}).get("value", "")
+            title = _preferred_wikidata_label(entity.get("labels", {}))
             description = entity.get("descriptions", {}).get("en", {}).get("value", "")
             wiki_title = entity.get("sitelinks", {}).get("enwiki", {}).get("title")
             wikipedia_url = (
@@ -130,7 +191,6 @@ class WikidataItem(models.Model):
 
             architect = ""
             image_url = ""
-            inception = None
 
             claims = entity.get("claims", {})
             if "P84" in claims:
@@ -151,21 +211,14 @@ class WikidataItem(models.Model):
                         image_url = f"https://commons.wikimedia.org/w/index.php?title=Special:Redirect/file/{filename_encoded}&width=300"
                         break
 
-            if "P571" in claims:
-                for claim in claims["P571"]:
-                    if claim.get("mainsnak", {}).get("snaktype") == "value":
-                        time_data = claim["mainsnak"]["datavalue"]["value"]
-                        if "time" in time_data and time_data["time"].startswith("+"):
-                            inception = time_data["time"][1:11]
-                            break
-
             return {
-                "title": title or self.wikidata_id,
+                "title": title,
                 "description": description,
                 "wikipedia_url": wikipedia_url,
                 "architect": architect,
                 "image_url": image_url,
-                "inception": inception,
+                "inception": _first_time_claim(claims, "P571"),
+                "demolished": _first_time_claim(claims, "P576"),
             }
 
         except requests.RequestException as e:
@@ -183,22 +236,34 @@ class WikidataItem(models.Model):
     def populate_from_wikidata(self):
         """Fetch and populate metadata from Wikidata API."""
         wikidata_info = self._fetch_wikidata_info()
-        if wikidata_info:
+        if wikidata_info and wikidata_info["title"]:
             self.title = wikidata_info["title"]
             self.description = wikidata_info["description"]
             self.wikipedia_url = wikidata_info["wikipedia_url"]
             self.architect = wikidata_info["architect"]
             self.image_url = wikidata_info["image_url"]
 
-            if wikidata_info["inception"]:
-                try:
-                    self.inception = datetime.strptime(
-                        wikidata_info["inception"], "%Y-%m-%d"
-                    ).date()
-                except (ValueError, TypeError):
-                    pass
+            for field in ("inception", "demolished"):
+                if wikidata_info[field]:
+                    try:
+                        parsed = datetime.strptime(
+                            wikidata_info[field], "%Y-%m-%d"
+                        ).date()
+                    except ValueError, TypeError:
+                        continue
+                    setattr(self, field, parsed)
             return True
         return False
+
+    def ensure_display_label(self):
+        """Replace an empty/Q-ID placeholder with an English or ``mul`` label."""
+        if self.title and self.title != self.wikidata_id:
+            return
+        if not self.populate_from_wikidata():
+            raise ValidationError(
+                f"No English or default label found for {self.wikidata_id}"
+            )
+        self.save()
 
     def _apply_seed_metadata(self, meta):
         """Apply a dict from extract_seed_metadata onto self in-place."""
@@ -209,22 +274,48 @@ class WikidataItem(models.Model):
         self.image_url = meta["image_url"]
         if meta["inception"]:
             self.inception = meta["inception"]
+        if meta["demolished"]:
+            self.demolished = meta["demolished"]
+
+    def queue_sparql_refresh(self, *, reset_failures=True):
+        """Move this item to the front of the WDQS refresh rotation.
+
+        The Beat-driven refresher normally works through seed items
+        oldest-first once they pass the staleness threshold; a queued item
+        is picked up on the very next tick regardless of how fresh it is.
+        ``sparql_fetch_failures`` is reset too, so an item that had
+        exhausted its retries becomes eligible again — a manual queue is a
+        deliberate "try this one again". Targeted UPDATE rather than
+        ``save()`` to keep clear of the is_new WDQS fetch path.
+
+        ``reset_failures=False`` is for automated callers (the region
+        containment repair in ``subjects.tasks``): they queue an item
+        because the mirror looks wrong, which is no evidence that a run
+        of fetch failures has stopped, and clearing the counter on a
+        schedule would keep any item they touch permanently below the
+        retry cap.
+        """
+        now = timezone.now()
+        fields = {"sparql_refresh_requested_at": now}
+        if reset_failures:
+            fields["sparql_fetch_failures"] = 0
+        WikidataItem.objects.filter(pk=self.pk).update(**fields)
+        self.sparql_refresh_requested_at = now
+        if reset_failures:
+            self.sparql_fetch_failures = 0
 
     def save(self, *args, **kwargs):
         is_new = self.pk is None
         if is_new:
-            # On creation, title is required. Placeholder until SPARQL fills it.
-            if not self.title:
-                self.title = self.wikidata_id
             # Sync path is only the cheap entity-JSON fetch: confirms the
             # Q-ID resolves and gives us a label/description to return to
-            # the caller. The P31?/P279* ancestor walk + Oxigraph load is
+            # the caller. The P31?/P279* ancestor walk + Memgraph load is
             # deferred to ``hydrate_wikidata_item`` on the urgent queue.
             # ``sparql_last_loaded_at`` stays NULL so the Beat refresher
             # picks the row up too if that task never runs.
             if not self.populate_from_wikidata():
                 raise ValidationError(
-                    f"No Wikidata entity found for {self.wikidata_id}"
+                    f"No English or default label found for {self.wikidata_id}"
                 )
 
         super().save(*args, **kwargs)
@@ -239,7 +330,17 @@ class WikidataItem(models.Model):
         ordering = ["title"]
         indexes = [
             models.Index(fields=["sparql_last_loaded_at"]),
-            # Trigram index on the English label backs the autocomplete
+            # Partial index: the manual-queue lookup runs on every Beat
+            # tick but only ever matches the handful of rows an admin has
+            # queued, so indexing the (almost always empty) non-null set
+            # keeps it off a scan of the 200k+ row table.
+            models.Index(
+                fields=["sparql_refresh_requested_at"],
+                name="wikidataitem_refresh_queued",
+                condition=models.Q(sparql_refresh_requested_at__isnull=False),
+            ),
+            # Trigram index on the preferred English/``mul`` label backs the
+            # autocomplete
             # categories query, which uses ``title__icontains`` to find
             # matching ancestors. Django's ``__icontains`` translates to
             # ``ILIKE '%q%'`` on Postgres, which a GIN index with
@@ -254,10 +355,64 @@ class WikidataItem(models.Model):
         ]
 
 
+class WikidataAlias(models.Model):
+    """One Wikidata alias (``skos:altLabel``) of a ``WikidataItem``.
+
+    Mirrored out of each closure load alongside ``WikidataItem.title`` (see
+    ``subjects.wikidata_aliases``) so the autocompletes can match alternative
+    names without a graph round trip.
+    """
+
+    item = models.ForeignKey(
+        WikidataItem, on_delete=models.CASCADE, related_name="aliases"
+    )
+    language = models.CharField(
+        max_length=35,
+        help_text="Language key as mirrored in Memgraph (e.g. en, mul, en_gb)",
+    )
+    alias = models.CharField(max_length=500)
+
+    def __str__(self):
+        return f"{self.alias} ({self.language})"
+
+    class Meta:
+        ordering = ["language", "alias"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["item", "language", "alias"],
+                name="wikidataalias_unique",
+            ),
+        ]
+        indexes = [
+            # Backs the ``alias__icontains`` arm of the autocomplete match,
+            # like ``subject_title_trgm`` does for titles.
+            GinIndex(
+                fields=["alias"],
+                name="wikidataalias_alias_trgm",
+                opclasses=["gin_trgm_ops"],
+            ),
+        ]
+
+
 class OsmElement(models.Model):
     """OpenStreetMap element with cached geometry"""
 
-    osm_id = models.BigIntegerField(unique=True, help_text="OpenStreetMap element ID")
+    class OsmType(models.TextChoices):
+        NODE = "N", "node"
+        WAY = "W", "way"
+        RELATION = "R", "relation"
+
+    # Nodes, ways and relations each number from 1, so the id alone is
+    # ambiguous. Rows imported before the type was recorded carry NULL until
+    # the refresh rotation next sees their subject; new rows are always typed.
+    osm_type = models.CharField(
+        max_length=1,
+        choices=OsmType.choices,
+        null=True,
+        blank=True,
+        help_text="OpenStreetMap element type",
+    )
+    osm_id = models.BigIntegerField(help_text="OpenStreetMap element ID")
     subject = models.ForeignKey(
         "Subject",
         on_delete=models.CASCADE,
@@ -286,7 +441,19 @@ class OsmElement(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"OSM Element {self.osm_id}"
+        return f"OSM Element {self.osm_ref or self.osm_id}"
+
+    @property
+    def osm_ref(self):
+        """``way/113023444``-style reference, or None until the type is known."""
+        if not self.osm_type:
+            return None
+        return f"{self.OsmType(self.osm_type).label}/{self.osm_id}"
+
+    @property
+    def osm_url(self):
+        ref = self.osm_ref
+        return f"https://www.openstreetmap.org/{ref}" if ref else None
 
     def save(self, *args, **kwargs):
         """Calculate geometry area and centroid before saving"""
@@ -296,7 +463,20 @@ class OsmElement(models.Model):
         super().save(*args, **kwargs)
 
     class Meta:
-        ordering = ["osm_id"]
+        ordering = ["osm_type", "osm_id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["osm_type", "osm_id"],
+                name="subjects_osmelement_unique_type_id",
+            ),
+            # Untyped rows keep the bare-id uniqueness they were imported
+            # under, so they can't multiply while they wait to be retyped.
+            models.UniqueConstraint(
+                fields=["osm_id"],
+                condition=models.Q(osm_type__isnull=True),
+                name="subjects_osmelement_unique_untyped_id",
+            ),
+        ]
 
 
 class Person(models.Model):
@@ -354,7 +534,9 @@ class Subject(models.Model):
     """Subject that can appear in images (buildings, people, monuments, etc.)"""
 
     title = models.CharField(max_length=500, help_text="Name/title of the subject")
-    slug = models.SlugField(unique=True)
+    # Cosmetic: URLs are keyed by the Q-ID (see ``url_key``), so slugs may
+    # repeat and may be empty.
+    slug = models.SlugField()
     wikidata_item = models.OneToOneField(
         WikidataItem,
         on_delete=models.CASCADE,
@@ -368,6 +550,10 @@ class Subject(models.Model):
         blank=True,
         related_name="+",
         help_text="User-chosen representative image for this subject",
+    )
+    generic = models.BooleanField(
+        default=False,
+        help_text="If marked as generic, a subject will not be shown on the map.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -387,8 +573,14 @@ class Subject(models.Model):
     def __str__(self):
         return self.title
 
+    @property
+    def url_key(self):
+        """The subject's URL path segment: its Q-ID, then the slug if any."""
+        qid = self.wikidata_item.wikidata_id
+        return f"{qid}-{self.slug}" if self.slug else qid
+
     def get_absolute_url(self):
-        return reverse("subjects:subject_detail", kwargs={"subject_slug": self.slug})
+        return reverse("subjects:subject_detail", kwargs={"qid": self})
 
     def get_description(self):
         """Return a description for display, sourced from the Wikidata item.
@@ -410,28 +602,47 @@ class Subject(models.Model):
         the field is the source of truth. The mapping fallback handles the
         edge case of a Subject with mappings but a null FK (e.g., a row
         predating the backfill).
+
+        The fallback is restricted to publishable images for the same reason
+        the signals are: this value is rendered on a public subject page, so a
+        Subject whose only mappings are private or duplicate images has no
+        representative rather than an undisclosable one.
         """
         if self.representative_image_id is not None:
             return self.representative_image
 
         first_mapping = (
-            self.image_mappings.select_related("image").order_by("order", "id").first()
+            self.image_mappings.filter(image__in=representable_images())
+            .select_related("image")
+            .order_by("order", "id")
+            .first()
         )
         return first_mapping.image if first_mapping else None
 
     class Meta:
         ordering = ["title"]
+        indexes = [
+            # Trigram index backing the tagging autocomplete
+            # (``title__icontains``). Only the ILIKE branch of that query
+            # is index-assisted; the ``word_similarity`` annotation is
+            # computed per row regardless. See the migration docstring.
+            GinIndex(
+                fields=["title"],
+                name="subject_title_trgm",
+                opclasses=["gin_trgm_ops"],
+            ),
+        ]
 
 
 class SubjectAncestor(models.Model):
     """Materialized ``Subject -> WikidataItem`` ancestor relation.
 
     A flat projection of each Subject's category-relevant ancestors, derived
-    from the same SPARQL paths the autocomplete used to traverse on the fly
-    (``wdt:P31?/wdt:P279*``, ``wdt:P1716``, ``wdt:P361``, ``pq:P361`` on any
-    of the Subject's statements). Refreshed per-subject after each Oxigraph
+    from the same graph paths the autocomplete used to traverse on the fly
+    (``P31?/P279*``, ``P1716``, ``P361``, and ``P361`` as a qualifier on any
+    of the Subject's statements). Refreshed per-subject after each Memgraph
     closure load; query-time aggregation/substring-match runs against this
-    table with proper indexes instead of via SPARQL property paths.
+    table with proper indexes instead of via graph traversal.
     """
 
     subject = models.ForeignKey(

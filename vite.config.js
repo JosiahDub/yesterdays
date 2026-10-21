@@ -38,13 +38,25 @@ export default defineConfig({
       input: {
         index: path.resolve(__dirname, "./assets/index.js"),
         home: path.resolve(__dirname, "./assets/js/pages/home.js"),
+        home_no_region: path.resolve(
+          __dirname,
+          "./assets/js/pages/home_no_region.ts",
+        ),
+        region_index: path.resolve(
+          __dirname,
+          "./assets/js/pages/region_index.ts",
+        ),
+        region_edit: path.resolve(
+          __dirname,
+          "./assets/js/pages/region_edit.ts",
+        ),
         image_detail: path.resolve(
           __dirname,
           "./assets/js/pages/image_detail.js",
         ),
         map_display: path.resolve(
           __dirname,
-          "./assets/js/components/map_display.js",
+          "./assets/js/components/map_display/index.ts",
         ),
         album_detail: path.resolve(
           __dirname,
@@ -57,20 +69,20 @@ export default defineConfig({
         search: path.resolve(__dirname, "./assets/js/pages/search.js"),
         browse_subjects: path.resolve(
           __dirname,
-          "./assets/js/pages/browse_subjects.js",
+          "./assets/js/pages/browse_subjects.ts",
         ),
         subjects_map: path.resolve(
           __dirname,
-          "./assets/js/pages/subjects_map.js",
+          "./assets/js/pages/subjects_map/index.ts",
         ),
-        from_above: path.resolve(__dirname, "./assets/js/pages/from_above.js"),
+        from_above: path.resolve(__dirname, "./assets/js/pages/from_above.ts"),
         georeference_interface: path.resolve(
           __dirname,
-          "./assets/js/pages/georeference_interface.js",
+          "./assets/js/pages/georeference_interface/index.ts",
         ),
         from_above_georeference_interface: path.resolve(
           __dirname,
-          "./assets/js/pages/from_above_georeference_interface.js",
+          "./assets/js/pages/from_above_georeference_interface.ts",
         ),
         stats: path.resolve(__dirname, "./assets/js/pages/stats.js"),
 
@@ -82,10 +94,15 @@ export default defineConfig({
           __dirname,
           "./assets/js/pages/similar_images.js",
         ),
-        map_detail: path.resolve(__dirname, "./assets/js/pages/map_detail.js"),
+        user_georeferences: path.resolve(
+          __dirname,
+          "./assets/js/pages/user_georeferences.js",
+        ),
+        map_detail: path.resolve(__dirname, "./assets/js/pages/map_detail.ts"),
+        layer_edit: path.resolve(__dirname, "./assets/js/pages/layer_edit.ts"),
         activity_feed: path.resolve(
           __dirname,
-          "./assets/js/pages/activity_feed.js",
+          "./assets/js/pages/activity_feed.ts",
         ),
         directory_create: path.resolve(
           __dirname,

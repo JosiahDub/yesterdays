@@ -46,6 +46,7 @@ export function imageGrid() {
     userAlbums: [],
     selectedAlbum: null,
     albumMode: "existing",
+    pendingBulkAction: null,
 
     /**
      * Initialize the component
@@ -66,6 +67,15 @@ export function imageGrid() {
 
       this.$el.addEventListener("show-add-to-album-modal", () => {
         this.showAddToAlbumModal();
+      });
+
+      // Listen for staff-only bulk status events
+      this.$el.addEventListener("bulk-mark-aerial", () => {
+        this.bulkMarkAerial();
+      });
+
+      this.$el.addEventListener("bulk-mark-will-not-georef", () => {
+        this.bulkMarkWillNotGeoref();
       });
     },
 
@@ -214,7 +224,6 @@ export function imageGrid() {
             cache: false,
           },
           resultItem: {
-            highlight: true,
             element: (item, data) => {
               item.style =
                 "display: flex; justify-content: space-between; align-items: center;";
@@ -225,12 +234,26 @@ export function imageGrid() {
                 <span style="text-overflow: ellipsis; white-space: nowrap; overflow: hidden;">
                     ${data.match} <small class="text-muted ms-2">${description}</small>
                 </span>
-                <span style="display: flex; align-items: center; font-size: 13px; font-weight: 100; text-transform: uppercase; color: rgba(0,0,0,.5);">
+                <span class="text-muted" style="display: flex; align-items: center; font-size: 13px; font-weight: 100; text-transform: uppercase;">
                     ${data.value.wikidata_id || ""}
                 </span>`;
             },
           },
           threshold: 2,
+          // The server does the (fuzzy) filtering and ranking; never drop
+          // or reorder results client-side. <mark> literal substring hits;
+          // typo-only hits render as plain text.
+          searchEngine: (query, record) => {
+            const idx = record.toLowerCase().indexOf(query.toLowerCase());
+            if (idx === -1) return record;
+            return (
+              record.slice(0, idx) +
+              "<mark>" +
+              record.slice(idx, idx + query.length) +
+              "</mark>" +
+              record.slice(idx + query.length)
+            );
+          },
           events: {
             input: {
               selection: (event) => {
@@ -253,6 +276,14 @@ export function imageGrid() {
         if (wikidataBtn) {
           wikidataBtn.addEventListener("click", () => {
             this.addWikidataId(inputEl.value.trim());
+          });
+        }
+
+        // Set up the quick-add button (only rendered on pages about a subject)
+        const quickAddBtn = document.getElementById("bulkQuickAddSubjectBtn");
+        if (quickAddBtn) {
+          quickAddBtn.addEventListener("click", () => {
+            this.quickAddSubject(quickAddBtn.dataset);
           });
         }
 
@@ -347,12 +378,37 @@ export function imageGrid() {
     },
 
     /**
+     * Add the page's subject (from the quick-add button's data attributes)
+     * to the selected subjects list
+     */
+    quickAddSubject({ subjectId, subjectTitle, wikidataId }) {
+      if (this.selectedBulkSubjects.some((s) => s.wikidata_id === wikidataId)) {
+        return;
+      }
+      this.selectedBulkSubjects.push({
+        id: Number(subjectId),
+        title: subjectTitle,
+        wikidata_id: wikidataId,
+      });
+      this.renderBulkSelectedSubjects();
+      document.getElementById("bulkAddSubjectBtn").disabled = false;
+    },
+
+    /**
      * Render the list of selected subjects in the modal
      */
     renderBulkSelectedSubjects() {
       const container = document.getElementById("bulkSelectedSubjectsList");
       const emptyMessage = document.getElementById("emptySubjectsMessage");
       if (!container) return;
+
+      // Disable quick-add while its subject is already in the list
+      const quickAddBtn = document.getElementById("bulkQuickAddSubjectBtn");
+      if (quickAddBtn) {
+        quickAddBtn.disabled = this.selectedBulkSubjects.some(
+          (s) => s.wikidata_id === quickAddBtn.dataset.wikidataId,
+        );
+      }
 
       if (this.selectedBulkSubjects.length === 0) {
         container.innerHTML = "";
@@ -736,6 +792,219 @@ export function imageGrid() {
         btn.disabled = false;
         btn.innerHTML = '<i class="fas fa-plus me-1"></i>Add to Album';
       }
+    },
+
+    // ==================== Bulk Status Methods (staff) ====================
+
+    /**
+     * Mark all selected images as aerial ("from above")
+     */
+    bulkMarkAerial() {
+      this.confirmBulkMarkFlag(
+        "/api/v1/bulk/from-above/",
+        "from above",
+        (count) => `Marked ${count} image(s) as from above.`,
+        "aerial",
+      );
+    },
+
+    /**
+     * Mark all selected images as "will not georeference"
+     */
+    bulkMarkWillNotGeoref() {
+      this.confirmBulkMarkFlag(
+        "/api/v1/bulk/will-not-georef/",
+        "will not georeference",
+        (count) => `Marked ${count} image(s) as will not georeference.`,
+        "will_not_georef",
+      );
+    },
+
+    /**
+     * Show the Bootstrap confirmation modal for a bulk status flag action.
+     * The action is stored as pending and performed if the user confirms.
+     */
+    confirmBulkMarkFlag(url, actionLabel, successMessage, flag) {
+      if (this.selectedIds.size === 0) return;
+
+      this.pendingBulkAction = { url, actionLabel, successMessage, flag };
+
+      const messageEl = document.getElementById("bulkConfirmMessage");
+      if (messageEl) {
+        messageEl.textContent = `Mark ${this.selectedIds.size} selected image(s) as ${actionLabel}?`;
+      }
+
+      const modalEl = document.getElementById("bulkConfirmModal");
+      if (!modalEl) return;
+
+      const modal = new bootstrap.Modal(modalEl);
+      modal.show();
+
+      const confirmBtn = document.getElementById("bulkConfirmBtn");
+      if (confirmBtn && !confirmBtn._hasClickHandler) {
+        confirmBtn.addEventListener("click", () => this.executeBulkMarkFlag());
+        confirmBtn._hasClickHandler = true;
+      }
+    },
+
+    /**
+     * Perform the pending bulk status flag action after confirmation.
+     * POSTs the selected image IDs, then updates the affected cards in place
+     * (no reload) so the user keeps their scroll position.
+     */
+    async executeBulkMarkFlag() {
+      const action = this.pendingBulkAction;
+      if (!action || this.selectedIds.size === 0) return;
+
+      const modal = bootstrap.Modal.getInstance(
+        document.getElementById("bulkConfirmModal"),
+      );
+      if (modal) modal.hide();
+
+      try {
+        const response = await fetch(action.url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRFToken": this.getCsrfToken(),
+          },
+          body: JSON.stringify({ image_ids: this.getSelectedIds() }),
+        });
+        const result = await response.json();
+
+        if (response.ok && result.success) {
+          // Capture the selection before toggleSelectionMode() clears it.
+          const ids = this.getSelectedIds();
+          this.showAlert(
+            "success",
+            action.successMessage(result.updated_count),
+          );
+          this.applyBulkFlagToCards(ids, action.flag);
+          this.toggleSelectionMode();
+        } else {
+          this.showAlert(
+            "danger",
+            result.error || "Failed to update images. Please try again.",
+          );
+        }
+      } catch (error) {
+        console.error("Error updating images:", error);
+        this.showAlert(
+          "danger",
+          "An error occurred while updating the images.",
+        );
+      } finally {
+        this.pendingBulkAction = null;
+      }
+    },
+
+    /**
+     * Update the just-marked cards in the DOM so the page doesn't reload.
+     * `flag` is "will_not_georef" or "aerial".
+     *
+     * The reproduced badge/footer markup below mirrors
+     * templates/images/partials/image_card.html — keep them in sync.
+     */
+    applyBulkFlagToCards(ids, flag) {
+      ids.forEach((id) => {
+        const card = this.$el.querySelector(
+          `.image-card-wrapper[data-image-id="${id}"]`,
+        );
+        // Scoped to .image-card-wrapper because data-image-id also sits on the
+        // per-card album dropdown button. Cards paginated away are a safe no-op.
+        if (!card) return;
+        if (flag === "will_not_georef") {
+          this.markCardWillNotGeorefInPlace(card);
+        } else if (flag === "aerial") {
+          this.markCardAerialInPlace(card, id);
+        }
+      });
+    },
+
+    /**
+     * Return the DocumentFragment holding a card's status badges — the content of
+     * the `<template x-if="!selectionMode">` block in image_card.html. We mutate
+     * this source (not the rendered clone) so the change survives Alpine re-cloning
+     * the template whenever selection mode is toggled again. This runs while
+     * selection mode is still on, so the badges are not currently rendered.
+     * Returns null when the card has no badges (e.g. badges=False grids).
+     */
+    cardBadgeContent(card) {
+      for (const tpl of card.querySelectorAll("template")) {
+        if (tpl.content && tpl.content.querySelector(".badge")) {
+          return tpl.content;
+        }
+      }
+      return null;
+    },
+
+    /**
+     * Mark a card "will not georeference" in place (mirrors image_card.html).
+     */
+    markCardWillNotGeorefInPlace(card) {
+      const badges = this.cardBadgeContent(card);
+      if (badges) {
+        const topRight = badges.querySelector(
+          ".badge.position-absolute.top-0.end-0.m-2",
+        );
+        if (topRight && /match/i.test(topRight.textContent)) {
+          // Search/similarity card: keep the "% match" badge, set the top-left
+          // icon-only indicator (image_card.html lines 53-64).
+          const group = badges.querySelector(
+            ".position-absolute.top-0.start-0.m-2.d-flex.gap-1",
+          );
+          if (group) {
+            group.innerHTML =
+              '<span class="badge bg-secondary" title="Will not georeference"><i class="fas fa-ban"></i></span>';
+          }
+        } else if (topRight) {
+          // Normal card: top-right status badge -> grey "Skip" (lines 29-32).
+          topRight.className =
+            "badge bg-secondary position-absolute top-0 end-0 m-2";
+          topRight.innerHTML = '<i class="fas fa-ban"></i> Skip';
+        }
+      }
+      // Footer: remove the action button; the album dropdown (a <button>) stays
+      // (lines 153-154).
+      card.querySelector(".card-footer a.btn")?.remove();
+    },
+
+    /**
+     * Mark a card as aerial ("from above") in place (mirrors image_card.html).
+     */
+    markCardAerialInPlace(card, id) {
+      const badges = this.cardBadgeContent(card);
+      if (badges) {
+        const topRight = badges.querySelector(
+          ".badge.position-absolute.top-0.end-0.m-2",
+        );
+        const isSimilarity = topRight && /match/i.test(topRight.textContent);
+        // The template only renders the plane badge in the non-similarity branch.
+        if (!isSimilarity && !badges.querySelector('[title="Aerial image"]')) {
+          const wrap = badges.querySelector("div") || badges;
+          let group = wrap.querySelector(
+            ".position-absolute.top-0.start-0.m-2.d-flex.gap-1",
+          );
+          if (!group) {
+            // Group is absent when the card had no difficulty and wasn't aerial
+            // (lines 67-68); create it to match the template.
+            group = document.createElement("div");
+            group.className =
+              "position-absolute top-0 start-0 m-2 d-flex gap-1";
+            wrap.appendChild(group);
+          }
+          // Plane badge goes first, before any difficulty badge (lines 69-78).
+          group.insertAdjacentHTML(
+            "afterbegin",
+            '<span class="badge bg-success" title="Aerial image"><i class="fas fa-plane"></i></span>',
+          );
+        }
+      }
+      // Footer: repoint only a pending "Georeference" button (btn-success) to the
+      // aerial interface; View buttons (btn-primary/outline) are left alone (line 170).
+      card
+        .querySelector(".card-footer a.btn-success")
+        ?.setAttribute("href", `/polygonal-georeference/${id}/`);
     },
 
     // ==================== Utility Methods ====================

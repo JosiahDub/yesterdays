@@ -21,16 +21,18 @@ from django.utils import timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from images.models import SiteSettings
+from images.tasks import reconcile_collection_region_stats
+from regions.models import Region, RegionAncestor
+from regions.region_ancestors import update_region_ancestors
 
+from .memgraph import GRAPH_ERRORS, MemgraphClient
 from .models import OsmElement, Subject, WikidataItem
-from .oxigraph import OxigraphClient
 from .project_graph import rebuild_project_graph
 from .subject_ancestors import update_subject_ancestors
 from .wikidata_closure import (
     SEED_METADATA_FIELDS,
     ClosureLoadError,
-    commit_closure_to_oxigraph,
+    commit_closure_to_memgraph,
     fetch_seed_data,
 )
 
@@ -67,12 +69,21 @@ def create_request_session():
 # =============================================================================
 
 
+def _region_ancestor_ids(region):
+    """The set of WikidataItem ids this region currently rolls up into."""
+    return set(
+        RegionAncestor.objects.filter(region=region).values_list(
+            "ancestor_id", flat=True
+        )
+    )
+
+
 def _do_refresh_wikidata_item(item):
-    """Re-pull a WikidataItem's closure from WDQS and refresh its named graphs.
+    """Re-pull a WikidataItem's closure from WDQS and refresh its mirror.
 
     One CONSTRUCT to WDQS gives us the seed's metadata fields and its
     closure neighbourhood; the seed row gets the metadata, each entity's
-    Oxigraph named graph gets atomically swapped, and ancestors discovered
+    Memgraph mirror gets atomically swapped, and ancestors discovered
     along the way are linked back to the seed's Subject via
     ``discovered_via``.
     """
@@ -81,13 +92,26 @@ def _do_refresh_wikidata_item(item):
 
     # Bump the freshness timestamp up front so a concurrent Beat tick
     # doesn't pick the same row while we're talking to WDQS. Targeted
-    # UPDATE avoids the full-row save that ``item.save()`` does.
+    # UPDATE avoids the full-row save that ``item.save()`` does. Any
+    # manual queue request is consumed here rather than on success: a
+    # request that survived a failure would pin the item at the front of
+    # the rotation forever, starving every other seed.
     now = timezone.now()
-    WikidataItem.objects.filter(pk=item.pk).update(sparql_last_loaded_at=now)
+    WikidataItem.objects.filter(pk=item.pk).update(
+        sparql_last_loaded_at=now, sparql_refresh_requested_at=None
+    )
     item.sparql_last_loaded_at = now
+    item.sparql_refresh_requested_at = None
+
+    # Region-ness decides the query shape: region seeds also walk their
+    # P131 containment chain, so resolve it before talking to WDQS.
+    try:
+        seed_region = item.region
+    except Region.DoesNotExist:
+        seed_region = None
 
     try:
-        data = fetch_seed_data(item.wikidata_id)
+        data = fetch_seed_data(item.wikidata_id, include_p131=seed_region is not None)
     except requests.RequestException as e:
         WikidataItem.objects.filter(pk=item.pk).update(
             sparql_fetch_failures=F("sparql_fetch_failures") + 1,
@@ -98,7 +122,7 @@ def _do_refresh_wikidata_item(item):
         WikidataItem.objects.filter(pk=item.pk).update(
             sparql_fetch_failures=F("sparql_fetch_failures") + 1,
         )
-        logger.warning(f"No closure returned for {item.wikidata_id}: {e}")
+        logger.warning(f"Unusable closure for {item.wikidata_id}: {e}")
         return {"status": "no_data", "wikidata_id": item.wikidata_id}
 
     try:
@@ -112,33 +136,78 @@ def _do_refresh_wikidata_item(item):
             item.sparql_last_loaded_at = timezone.now()
             item.sparql_fetch_failures = 0
             item.save(update_fields=list(SEED_METADATA_FIELDS))
-            commit_closure_to_oxigraph(
+            coordinate = data["metadata"]["coordinate_location"]
+            if seed_region is not None and coordinate is not None:
+                # P625 rides along in the seed metadata but belongs to the
+                # Region, not the item. Only written when the claim is
+                # present: a P625 that vanishes upstream (vandalism, a
+                # rename, a bad edit) is far more likely to be a mistake
+                # than a real correction, so the last known coordinate
+                # stands — and clearing it would breach
+                # region_has_a_coordinate for a region with no custom
+                # centerpoint, turning that edit into an outage. An
+                # admin's
+                # custom_coordinate_location is a separate column and
+                # untouched here — a refresh must never walk a
+                # hand-placed map center. Targeted UPDATE for the same
+                # reason as above, with updated_at set by hand since
+                # auto_now doesn't fire on queryset updates.
+                Region.objects.filter(pk=seed_region.pk).update(
+                    wikidata_coordinate_location=coordinate,
+                    updated_at=timezone.now(),
+                )
+            commit_closure_to_memgraph(
                 item.wikidata_id,
                 data["groups"],
                 data["labels"],
                 discovered_via=seed_subject,
             )
-    except requests.RequestException as e:
+    except GRAPH_ERRORS as e:
         WikidataItem.objects.filter(pk=item.pk).update(
             sparql_fetch_failures=F("sparql_fetch_failures") + 1,
         )
-        logger.error(f"Oxigraph update failed for {item.wikidata_id}: {e}")
+        logger.error(f"Memgraph update failed for {item.wikidata_id}: {e}")
         return {"status": "error", "wikidata_id": item.wikidata_id, "message": str(e)}
 
     # Project the seed's category ancestors into Postgres. Best-effort:
-    # if this fails we keep the successful Oxigraph commit, and the next
+    # if this fails we keep the successful Memgraph commit, and the next
     # refresh of the same Subject will re-attempt the projection.
     if seed_subject is not None:
         try:
-            with OxigraphClient() as client:
+            with MemgraphClient() as client:
                 update_subject_ancestors(seed_subject, client)
-        except requests.RequestException as e:
+        except GRAPH_ERRORS as e:
             logger.warning(
                 "SubjectAncestor refresh failed for %s: %s — "
                 "will retry on next refresh of this Subject",
                 item.wikidata_id,
                 e,
             )
+
+    # Same deal for the region containment projection.
+    if seed_region is not None:
+        # Snapshotted around the call rather than reported back by
+        # update_region_ancestors, which is also driven by the shell-only
+        # rebuild_all_region_ancestors() in a loop — a reconcile per region
+        # there would be pure waste.
+        ancestors_before = _region_ancestor_ids(seed_region)
+        try:
+            with MemgraphClient() as client:
+                update_region_ancestors(seed_region, client)
+        except GRAPH_ERRORS as e:
+            logger.warning(
+                "RegionAncestor refresh failed for %s: %s — "
+                "will retry on next refresh of this Region",
+                item.wikidata_id,
+                e,
+            )
+        else:
+            if _region_ancestor_ids(seed_region) != ancestors_before:
+                # Which regions this region's images roll up into just
+                # changed, and no image, collection, or source row moved to
+                # signal it. This call site sits outside the atomic block
+                # above, so on_commit fires straight away.
+                transaction.on_commit(reconcile_collection_region_stats.delay)
 
     logger.info(f"Successfully refreshed WikidataItem {item.wikidata_id}")
     return {"status": "success", "wikidata_id": item.wikidata_id}
@@ -154,7 +223,7 @@ def get_postpass_url():
     return getattr(
         settings,
         "METADATA_REFRESH_POSTPASS_URL",
-        "https://postpass.geofabrik.de/api/0.2/interpreter",
+        "https://postpass.geofabrik.de/api/interpreter",
     )
 
 
@@ -163,15 +232,64 @@ def get_postpass_timeout():
     return getattr(settings, "METADATA_REFRESH_POSTPASS_TIMEOUT", 60)
 
 
-def get_postpass_bbox():
-    """Build the bounding box SQL clause for Postpass queries from SiteSettings."""
-    site_settings = SiteSettings.load()
-    return (
-        f"ST_SetSRID(ST_MakeBox2D("
-        f"ST_MakePoint({site_settings.default_subject_bbox_west}, {site_settings.default_subject_bbox_south}), "
-        f"ST_MakePoint({site_settings.default_subject_bbox_east}, {site_settings.default_subject_bbox_north})"
-        f"), 4326)"
-    )
+def get_postpass_max_features():
+    """Most OSM elements accepted for a single Wikidata item."""
+    return getattr(settings, "METADATA_REFRESH_POSTPASS_MAX_FEATURES", 100)
+
+
+class PostpassResultTruncated(RuntimeError):
+    """Postpass matched more elements than we're willing to import.
+
+    Raised instead of returning a partial list: the elements a truncated
+    result omits would look stale and get deleted.
+    """
+
+
+def sync_osm_elements(subject, features):
+    """Reconcile ``subject``'s OsmElements with the features Postpass returned.
+
+    Identity is ``(osm_type, osm_id)``. A row that predates ``osm_type``
+    (NULL) and belongs to this subject is claimed by the matching typed
+    feature rather than replaced, so its primary key survives. Untyped rows
+    under other subjects are left alone — they resolve when that subject
+    refreshes — and new rows are always typed. Whatever the response didn't
+    mention is deleted as stale, which for an empty response is everything.
+
+    Returns ``(created, updated, deleted)`` counts.
+    """
+    untyped = {
+        element.osm_id: element
+        for element in subject.osm_elements.filter(osm_type__isnull=True)
+    }
+    kept_pks = set()
+    created = updated = 0
+
+    for feature in features:
+        properties = feature["properties"]
+        osm_type = properties["osm_type"]
+        osm_id = properties["osm_id"]
+        geometry = GEOSGeometry(json.dumps(feature["geometry"]))
+
+        element = OsmElement.objects.filter(osm_type=osm_type, osm_id=osm_id).first()
+        if element is None:
+            element = untyped.pop(osm_id, None)
+        if element is None:
+            element, _ = OsmElement.objects.get_or_create(
+                osm_type=osm_type,
+                osm_id=osm_id,
+                defaults={"subject": subject, "geometry": geometry},
+            )
+            created += 1
+        else:
+            element.osm_type = osm_type
+            element.subject = subject
+            element.geometry = geometry
+            element.save()
+            updated += 1
+        kept_pks.add(element.pk)
+
+    deleted = subject.osm_elements.exclude(pk__in=kept_pks).delete()[0]
+    return created, updated, deleted
 
 
 def _do_populate_osm_for_subject(subject):
@@ -190,42 +308,25 @@ def _do_populate_osm_for_subject(subject):
 
     session = create_request_session()
     try:
-        features = fetch_osm_features(session, wikidata_id)
+        try:
+            features = fetch_osm_features(session, wikidata_id)
+        except PostpassResultTruncated as exc:
+            logger.warning(f"Skipping {subject.title}: {exc}")
+            return {"status": "skipped", "subject": subject.title, "message": str(exc)}
 
         if not features:
             logger.info(f"No OSM features found for {subject.title} ({wikidata_id})")
             return {"status": "no_data", "subject": subject.title}
 
-        osm_ids = []
-        for feature in features:
-            osm_id = feature["properties"]["osm_id"]
-            geometry = feature["geometry"]
+        created, updated, _ = sync_osm_elements(subject, features)
+        logger.info(f"Linked {created + updated} OSM element(s) to {subject.title}")
 
-            # Create or get existing OsmElement and link to subject
-            osm_element, created = OsmElement.objects.get_or_create(
-                osm_id=osm_id,
-                defaults={
-                    "subject": subject,
-                    "geometry": GEOSGeometry(json.dumps(geometry)),
-                },
-            )
-
-            if not created:
-                # Update geometry and subject if element already exists
-                osm_element.subject = subject
-                osm_element.geometry = GEOSGeometry(json.dumps(geometry))
-                osm_element.save()
-                logger.info(
-                    f"Updated existing OSM element {osm_id} for {subject.title}"
-                )
-            else:
-                logger.info(f"Created OSM element {osm_id} for {subject.title}")
-
-            osm_ids.append(osm_id)
-
-        logger.info(f"Linked {len(osm_ids)} OSM element(s) to {subject.title}")
-
-        return {"status": "success", "subject": subject.title, "osm_ids": osm_ids}
+        return {
+            "status": "success",
+            "subject": subject.title,
+            "created": created,
+            "updated": updated,
+        }
 
     finally:
         session.close()
@@ -251,72 +352,32 @@ def _do_refresh_osm_for_subject(subject):
 
     session = create_request_session()
     try:
-        features = fetch_osm_features(session, wikidata_id)
+        try:
+            features = fetch_osm_features(session, wikidata_id)
+        except PostpassResultTruncated as exc:
+            logger.warning(f"Skipping {subject.title}: {exc}")
+            return {"status": "skipped", "subject": subject.title, "message": str(exc)}
+
+        created, updated, deleted = sync_osm_elements(subject, features)
 
         if not features:
-            # No features found - delete all existing OSM elements for this subject
-            deleted_count = subject.osm_elements.count()
-            if deleted_count > 0:
-                subject.osm_elements.all().delete()
-                logger.info(
-                    f"Deleted {deleted_count} OSM element(s) for {subject.title} (no longer in OSM)"
-                )
-            else:
-                logger.info(f"No OSM features found for {subject.title}")
-            return {
-                "status": "no_data",
-                "subject": subject.title,
-                "deleted": deleted_count,
-            }
-
-        # Get current OSM IDs for this subject
-        current_osm_ids = set(subject.osm_elements.values_list("osm_id", flat=True))
-        new_osm_ids = {f["properties"]["osm_id"] for f in features}
-
-        # Delete OSM elements that are no longer in the API response
-        stale_osm_ids = current_osm_ids - new_osm_ids
-        deleted_count = 0
-        if stale_osm_ids:
-            deleted_count = subject.osm_elements.filter(
-                osm_id__in=stale_osm_ids
-            ).delete()[0]
+            # An empty answer means the tag is gone from OSM; sync dropped everything
             logger.info(
-                f"Deleted {deleted_count} stale OSM element(s) for {subject.title}"
+                f"No OSM features found for {subject.title}; "
+                f"deleted {deleted} element(s) no longer in OSM"
             )
-
-        # Create or update OsmElements for all features
-        created_count = 0
-        updated_count = 0
-        for feature in features:
-            osm_id = feature["properties"]["osm_id"]
-            geometry = feature["geometry"]
-
-            osm_element, created = OsmElement.objects.get_or_create(
-                osm_id=osm_id,
-                defaults={
-                    "subject": subject,
-                    "geometry": GEOSGeometry(json.dumps(geometry)),
-                },
-            )
-
-            if not created:
-                osm_element.subject = subject
-                osm_element.geometry = GEOSGeometry(json.dumps(geometry))
-                osm_element.save()
-                updated_count += 1
-            else:
-                created_count += 1
+            return {"status": "no_data", "subject": subject.title, "deleted": deleted}
 
         logger.info(
             f"Refreshed OSM elements for {subject.title}: "
-            f"created {created_count}, updated {updated_count}, deleted {deleted_count}"
+            f"created {created}, updated {updated}, deleted {deleted}"
         )
         return {
             "status": "success",
             "subject": subject.title,
-            "created": created_count,
-            "updated": updated_count,
-            "deleted": deleted_count,
+            "created": created,
+            "updated": updated,
+            "deleted": deleted,
         }
 
     finally:
@@ -329,13 +390,20 @@ def fetch_osm_features(
     postpass_url: str | None = None,
     timeout: int | None = None,
 ) -> list:
-    """Fetch OSM features from Postpass API for a Wikidata item.
+    """Fetch OSM features worldwide from Postpass for a Wikidata item.
+
+    Each feature's properties carry ``osm_id`` and ``osm_type`` (``N``, ``W``
+    or ``R``). An empty list is a real answer — nothing in OSM carries the
+    tag — so callers may delete on it; anything doubtful raises instead.
 
     Args:
         session: requests Session object
         wikidata_id: Wikidata ID (e.g., Q42)
         postpass_url: Optional override for Postpass API URL (defaults to settings)
         timeout: Optional override for request timeout (defaults to settings)
+
+    Raises:
+        PostpassResultTruncated: more matches than METADATA_REFRESH_POSTPASS_MAX_FEATURES
     """
     # Validate wikidata_id format to prevent SQL injection
     # Wikidata IDs are always Q followed by one or more digits (e.g., Q42, Q12345)
@@ -344,11 +412,21 @@ def fetch_osm_features(
 
     postpass_url = postpass_url or get_postpass_url()
     timeout = timeout or get_postpass_timeout()
-    bbox_clause = get_postpass_bbox()
+    max_features = get_postpass_max_features()
+    tag_filter = json.dumps({"wikidata": wikidata_id})
 
+    # JSON containment uses Postpass's GIN tag indexes; extracting text with
+    # ->> cannot use those indexes and makes worldwide lookups expensive.
+    # The combined view emits one row per geometry table, so a boundary
+    # relation appears as both its outline and its area; DISTINCT ON keeps the
+    # highest-dimension row. Fetching one past the cap tells a truncated
+    # result apart from an exact fit.
     sql_query = f"""
-    SELECT osm_id, tags, geom FROM postpass_pointlinepolygon
-    WHERE tags->>'wikidata' = '{wikidata_id}' AND geom && {bbox_clause}
+    SELECT DISTINCT ON (osm_type, osm_id) osm_id, osm_type, tags, geom
+    FROM postpass_pointlinepolygon
+    WHERE tags @> '{tag_filter}'::jsonb
+    ORDER BY osm_type, osm_id, ST_Dimension(geom) DESC
+    LIMIT {max_features + 1}
     """
 
     response = session.post(
@@ -362,12 +440,14 @@ def fetch_osm_features(
     response.raise_for_status()
 
     data = response.json()
-    features = data.get("features", [])
+    if "features" not in data:
+        raise ValueError(f"Postpass response for {wikidata_id} has no features key")
 
-    # Ensure osm_id is in properties
-    for feature in features:
-        if "osm_id" not in feature.get("properties", {}):
-            feature["properties"]["osm_id"] = feature["properties"].get("osm_id", 0)
+    features = data["features"]
+    if len(features) > max_features:
+        raise PostpassResultTruncated(
+            f"{wikidata_id} matches more than {max_features} OSM elements"
+        )
 
     return features
 
@@ -377,8 +457,39 @@ def fetch_osm_features(
 # =============================================================================
 
 
+def get_next_requested_wikidata_item():
+    """Find the next WikidataItem an admin has manually queued.
+
+    These jump ahead of the staleness rotation and ignore both the
+    freshness threshold and the failure cap — the point of the button is
+    to refresh an item *now*, including one that just failed its way out
+    of the rotation. Still restricted to Subject/Region seeds, since a
+    bare ancestor item has no closure of its own worth fetching.
+    """
+
+    return (
+        WikidataItem.objects.filter(
+            Q(subject__isnull=False) | Q(region__isnull=False),
+            sparql_refresh_requested_at__isnull=False,
+        )
+        .order_by("sparql_refresh_requested_at")
+        .first()
+    )
+
+
 def get_next_stale_wikidata_item():
-    """Find the next WikidataItem whose Oxigraph closure needs refreshing."""
+    """
+    Find the next WikidataItem whose graph closure needs refreshing.
+
+    Only items attached to a Subject or a Region are refreshed on their
+    own schedule. Ancestor items discovered via closure fetches don't need
+    one: their mirrored data is replaced whenever a seed's closure includes
+    them, and ``commit_closure_to_memgraph`` bumps their freshness
+    timestamps then. Enrolling them here made the rotation unbounded —
+    each ancestor refresh fetched *its* closure, discovering ever-deeper
+    ancestors, until the queue (200k+ items) could never drain within the
+    staleness window.
+    """
 
     stale_hours = get_stale_threshold_hours()
     max_failures = get_max_failures()
@@ -388,6 +499,7 @@ def get_next_stale_wikidata_item():
         WikidataItem.objects.filter(
             Q(sparql_last_loaded_at__isnull=True)
             | Q(sparql_last_loaded_at__lt=stale_threshold),
+            Q(subject__isnull=False) | Q(region__isnull=False),
             sparql_fetch_failures__lt=max_failures,
         )
         .order_by("sparql_last_loaded_at")
@@ -448,7 +560,7 @@ def refresh_next_wikidata_item():
     Called periodically by Celery Beat at the configured rate limit interval.
     This approach ensures global rate limiting regardless of worker count.
     """
-    item = get_next_stale_wikidata_item()
+    item = get_next_requested_wikidata_item() or get_next_stale_wikidata_item()
     if item is None:
         logger.debug("No stale WikidataItems to refresh")
         return {"status": "idle", "message": "No stale items"}
@@ -459,7 +571,7 @@ def refresh_next_wikidata_item():
 
 @shared_task(ignore_result=True)
 def hydrate_wikidata_item(wikidata_id):
-    """Load a single WikidataItem's closure into Oxigraph.
+    """Load a single WikidataItem's closure into Memgraph.
 
     Enqueued from ``WikidataItem.save()`` on the urgent queue after the
     cheap entity-JSON validation has already created the row. Same body
@@ -502,10 +614,10 @@ def refresh_next_osm_element():
 
 @shared_task(ignore_result=True)
 def reconcile_project_graph():
-    """Wholesale-rebuild the Oxigraph project graph from Subject rows.
+    """Wholesale-rebuild the project-subject markers from Subject rows.
 
-    The project graph is maintained incrementally by post_save/post_delete
-    signals, but those don't backfill after a fresh Oxigraph volume or
+    The markers are maintained incrementally by post_save/post_delete
+    signals, but those don't backfill after a fresh Memgraph volume or
     cover signal failures. This periodic reconcile self-heals any drift.
     """
     count = rebuild_project_graph()

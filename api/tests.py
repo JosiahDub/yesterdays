@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.contrib.gis.geos import Point, Polygon
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from oauth2_provider.models import AccessToken, Application, RefreshToken
 
@@ -23,6 +23,7 @@ from images.models import (
     Georeference,
     GeoreferenceValidation,
     Image,
+    ImportSlot,
     License,
     Source,
     SubjectMapping,
@@ -165,6 +166,7 @@ class ApiFixturesMixin:
         )
         SubjectMapping.objects.create(image=cls.img1, subject=cls.subject)
         cls.osm_element = OsmElement.objects.create(
+            osm_type="W",
             osm_id=12345,
             subject=cls.subject,
             geometry=Polygon(POLYGON_COORDS, srid=4326),
@@ -556,6 +558,76 @@ class TestImagesEndpoint(ApiFixturesMixin, TestCase):
         self.assertIsNone(resp.json()["duplicate_of"])
 
 
+class TestImageReplaceEndpoint(ApiFixturesMixin, TestCase):
+    """Replacing an image's file must not take the image off the site while
+    its new thumbnail and tiles build. Rebuilding a large scan takes minutes,
+    and every template falls back to the raw original when the derived assets
+    are missing — an original that is routinely a TIFF no browser can show."""
+
+    def setUp(self):
+        self.importer = User.objects.create_user(
+            username="osm_500", password="test", is_staff=True
+        )
+        self.client.force_login(self.importer)
+        self.slot = ImportSlot.objects.create(
+            collection=self.collection,
+            created_by=self.importer,
+            s3_key="imports/b5e7c9f2.jpg",
+            content_type="image/jpeg",
+        )
+        self.old_thumbnail = f"https://cdn.test/images/{self.img1.pk}/3/thumbnail.webp"
+        self.old_iiif = f"https://cdn.test/images/{self.img1.pk}/3/tiles"
+        Image.objects.filter(pk=self.img1.pk).update(
+            asset_generation=3,
+            thumbnail=self.old_thumbnail,
+            iiif_url=self.old_iiif,
+            tile_status="complete",
+        )
+
+    def replace(self):
+        with (
+            patch("api.views.R2Uploader") as uploader_cls,
+            patch("api.views.process_image.delay") as delay,
+        ):
+            r2 = uploader_cls.return_value
+            r2.head_object.return_value = {"ContentLength": 1024}
+            r2.iter_keys.return_value = [f"images/{self.img1.pk}/original.jpg"]
+            r2.copy_object.return_value = (
+                f"https://cdn.test/images/{self.img1.pk}/original.jpg"
+            )
+            with self.captureOnCommitCallbacks(execute=True):
+                resp = self.client.post(
+                    f"/api/v2/images/{self.img1.pk}/replace/",
+                    {"slot_id": str(self.slot.slot_id)},
+                    content_type="application/json",
+                )
+        self.img1.refresh_from_db()
+        return resp, delay
+
+    def test_repoints_permalink_and_consumes_slot(self):
+        resp, _ = self.replace()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            self.img1.permalink,
+            f"https://cdn.test/images/{self.img1.pk}/original.jpg",
+        )
+        self.assertFalse(ImportSlot.objects.filter(slot_id=self.slot.slot_id).exists())
+
+    def test_previous_assets_stay_referenced_until_rebuild_finishes(self):
+        self.replace()
+        self.assertEqual(self.img1.thumbnail, self.old_thumbnail)
+        self.assertEqual(self.img1.iiif_url, self.old_iiif)
+        # tile_status is a rebuild flag, not a display field: clearing it is
+        # what tells process_image the tiles are out of date.
+        self.assertEqual(self.img1.tile_status, "")
+
+    def test_queues_forced_regeneration(self):
+        """Without force, process_image sees a thumbnail already set and no
+        transform, and short-circuits — leaving the old picture forever."""
+        _, delay = self.replace()
+        delay.assert_called_once_with(self.img1.pk, force=True)
+
+
 # ---------------------------------------------------------------------------
 # Subjects
 # ---------------------------------------------------------------------------
@@ -587,6 +659,8 @@ class TestSubjectsEndpoint(ApiFixturesMixin, TestCase):
         self.assertEqual(len(data["features"]), 1)
         feature = data["features"][0]
         self.assertEqual(feature["properties"]["osm_id"], 12345)
+        self.assertEqual(feature["properties"]["osm_type"], "W")
+        self.assertEqual(feature["properties"]["osm_ref"], "way/12345")
 
     def test_geometry_empty_subject(self):
         """Geometry endpoint returns empty FeatureCollection for subject with no OSM elements."""
@@ -791,6 +865,81 @@ class TestFromAboveGeoreferencesEndpoint(ApiFixturesMixin, TestCase):
             "/api/v2/from-above-georeferences/?ordering=-georeferenced_at"
         )
         self.assertEqual(resp.status_code, 200)
+
+
+# ---------------------------------------------------------------------------
+# Contributor filtering (both georeference endpoints)
+# ---------------------------------------------------------------------------
+
+
+class TestGeoreferenceContributorFilters(ApiFixturesMixin, TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        Georeference.objects.filter(pk=cls.georef2_new.pk).update(
+            georeferenced_by=cls.user_bob,
+        )
+        aerial_image = Image.objects.create(
+            collection=cls.collection,
+            title="Another aerial image",
+            permalink="https://img.example.com/another-aerial.jpg",
+            aerial=True,
+        )
+        alice_aerial = AerialGeoreference.objects.create(
+            image=aerial_image,
+            polygon=Polygon(POLYGON_COORDS, srid=4326),
+            confidence="high",
+            georeferenced_by=cls.user_alice,
+        )
+        cls.endpoints = [
+            ("/api/v2/georeferences/", cls.georef1.pk, cls.georef2_new.pk),
+            (
+                "/api/v2/from-above-georeferences/",
+                alice_aerial.pk,
+                cls.aerial_georef.pk,
+            ),
+        ]
+
+    def test_single_and_multiple_contributors(self):
+        for endpoint, alice_id, bob_id in self.endpoints:
+            for value, expected in [
+                ("100", {alice_id}),
+                ("200", {bob_id}),
+                ("100,200", {alice_id, bob_id}),
+                (" 100, 200 ", {alice_id, bob_id}),
+                ("100,100", {alice_id}),
+                ("999999", set()),
+                ("100,999999", {alice_id}),
+            ]:
+                with self.subTest(endpoint=endpoint, value=value):
+                    response = self.client.get(endpoint, {"georeferenced_by": value})
+                    self.assertEqual(response.status_code, 200)
+                    data = response.json()
+                    self.assertEqual(data["count"], len(expected))
+                    self.assertEqual({f["id"] for f in data["features"]}, expected)
+
+    def test_admin_contributor_id(self):
+        User.objects.filter(pk=self.user_bob.pk).update(username="hardcoded_admin")
+        for endpoint, alice_id, admin_id in self.endpoints:
+            for value, expected in [
+                ("0", {admin_id}),
+                ("0,100", {admin_id, alice_id}),
+            ]:
+                with self.subTest(endpoint=endpoint, value=value):
+                    response = self.client.get(endpoint, {"georeferenced_by": value})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(
+                        {f["id"] for f in response.json()["features"]},
+                        expected,
+                    )
+
+    def test_invalid_contributor_ids(self):
+        for endpoint, _, _ in self.endpoints:
+            for value in ["abc", "100,abc", "100,", ",100", "100,,200", "100.5"]:
+                with self.subTest(endpoint=endpoint, value=value):
+                    response = self.client.get(endpoint, {"georeferenced_by": value})
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn("georeferenced_by", response.json())
 
 
 # ---------------------------------------------------------------------------
@@ -1111,38 +1260,463 @@ class TestAuthorizedApplicationsSettings(OAuthConsentFixturesMixin, TestCase):
 
 
 # ---------------------------------------------------------------------------
-# RSS Feeds
+# Search: georeferenced filter (aerial polygon georefs)
 # ---------------------------------------------------------------------------
 
 
-class TestSitewideActivityFeed(ApiFixturesMixin, TestCase):
-    def test_feed_status_and_type(self):
-        resp = self.client.get("/activity/feed/")
+class TestSearchGeoreferencedFilter(TestCase):
+    """The ``/api/v2/search/`` ``georeferenced=true|false`` filter must respect
+    BOTH kinds of georeference, mirroring ``Image.is_georeferenced``: point
+    georefs for regular images and aerial (polygon) georefs for aerial images.
+
+    Regression test: ``_parse_search_filters`` (shared by the semantic and text
+    search endpoints) used to check only the point ``images_georeference``
+    table, so an aerial image with only a polygon georef leaked through
+    ``georeferenced=false`` (and was wrongly hidden by ``georeferenced=true``).
+    Exercised through the text-search endpoint, which needs no CLIP service.
+    """
+
+    TOKEN = "riverbend"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="osm_1", password="test")
+        cls.source = Source.objects.create(
+            name="Src",
+            slug="src",
+            url="https://example.com",
+            description="",
+            public=True,
+        )
+        cls.collection = Collection.objects.create(
+            source=cls.source,
+            name="Col",
+            slug="col",
+            url="https://example.com",
+            public=True,
+        )
+
+        # Non-aerial image with a point georeference -> georeferenced.
+        cls.img_point = cls._make_image("Point photo")
+        Georeference.objects.create(
+            image=cls.img_point,
+            point=Point(-77.43, 37.54, srid=4326),
+            confidence="high",
+            georeferenced_by=cls.user,
+        )
+        # Aerial image with a polygon georeference -> georeferenced. THE BUG CASE.
+        cls.img_aerial = cls._make_image("Aerial photo", aerial=True)
+        AerialGeoreference.objects.create(
+            image=cls.img_aerial,
+            polygon=Polygon(POLYGON_COORDS, srid=4326),
+            confidence="high",
+            georeferenced_by=cls.user,
+        )
+        # Non-aerial image with no georeference -> not georeferenced.
+        cls.img_plain = cls._make_image("Plain photo")
+        # Aerial image with no georeference -> not georeferenced.
+        cls.img_aerial_plain = cls._make_image("Aerial pending photo", aerial=True)
+
+        cls.all_ids = {
+            cls.img_point.id,
+            cls.img_aerial.id,
+            cls.img_plain.id,
+            cls.img_aerial_plain.id,
+        }
+        cls.georeferenced_ids = {cls.img_point.id, cls.img_aerial.id}
+        cls.not_georeferenced_ids = {cls.img_plain.id, cls.img_aerial_plain.id}
+
+    @classmethod
+    def _make_image(cls, title, aerial=False):
+        img = Image.objects.create(
+            collection=cls.collection,
+            title=title,
+            permalink=f"https://img.example.com/{title}.jpg",
+            description=f"A photograph of the {cls.TOKEN} district.",
+            aerial=aerial,
+        )
+        # Pick up the signal-computed is_searchable flag.
+        img.refresh_from_db()
+        return img
+
+    def _search_ids(self, **params):
+        resp = self.client.get("/api/v2/search/text/", {"q": self.TOKEN, **params})
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp["Content-Type"], "application/rss+xml; charset=utf-8")
+        return {r["id"] for r in resp.json()["results"]}
 
-    def test_feed_content(self):
-        resp = self.client.get("/activity/feed/")
-        content = resp.content.decode("utf-8")
-        
-        self.assertIn('<rss version="2.0"', content)
-        self.assertIn("<title>Yesterdays - Site-wide Activity</title>", content)
-        # Based on the test fixtures, we should have a milestone in the activity feed
-        self.assertIn("milestone", content.lower())
+    def test_no_filter_returns_all(self):
+        self.assertEqual(self._search_ids(), self.all_ids)
+
+    def test_georeferenced_false_excludes_aerial_polygon(self):
+        ids = self._search_ids(georeferenced="false")
+        # The aerial image is georeferenced via a polygon and must NOT leak
+        # through georeferenced=false.
+        self.assertNotIn(self.img_aerial.id, ids)
+        self.assertEqual(ids, self.not_georeferenced_ids)
+
+    def test_georeferenced_true_includes_aerial_polygon(self):
+        ids = self._search_ids(georeferenced="true")
+        # The aerial-with-polygon image must be counted as georeferenced.
+        self.assertIn(self.img_aerial.id, ids)
+        self.assertEqual(ids, self.georeferenced_ids)
 
 
-class TestSubjectActivityFeed(ApiFixturesMixin, TestCase):
-    def test_feed_status_and_type(self):
-        resp = self.client.get(f"/subjects/{self.subject.slug}/feed/")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp["Content-Type"], "application/rss+xml; charset=utf-8")
+# ---------------------------------------------------------------------------
+# In-view search
+# ---------------------------------------------------------------------------
 
-    def test_feed_content(self):
-        resp = self.client.get(f"/subjects/{self.subject.slug}/feed/")
-        content = resp.content.decode("utf-8")
-        self.assertIn('<rss version="2.0"', content)
-        self.assertIn(self.img1.title, content)
+# The point every test searches around. It is deliberately the *superseded*
+# location of ``img2``, so any test that finds img2 at distance zero has caught
+# a stale georeference resurfacing.
+ORIGIN_LAT = 37.53
+ORIGIN_LON = -77.44
 
-    def test_feed_404(self):
-        resp = self.client.get("/subjects/fake-subject/feed/")
-        self.assertEqual(resp.status_code, 404)
+
+class TestInViewSearchEndpoint(ApiFixturesMixin, TestCase):
+    """``/api/v2/search/in-view/``.
+
+    Unlike the CLIP and trigram endpoints, this one is fully deterministic —
+    PostGIS decides the order, not a model — so the tests assert exact
+    sequences rather than smoke-testing for a 200.
+
+    Laid out around ORIGIN, at this latitude (0.001 degrees is about 88 m of
+    longitude and 111 m of latitude). None of these carry a direction, so all
+    of them clear the directional sweep:
+
+        img_near          111 m    collection A, source lva,     1950
+        img2 (latest)     883 m    collection A, source lva,     1920-1930
+        img_far_b        1110 m    collection B, source lva,     1960
+        img_facing_origin 1332 m   collection A, source lva,     1935
+        img1             1419 m    collection A, source lva,     1900-1910
+        img_other_source 2224 m    collection C, source scrapbook, 1970
+
+    img_facing_origin is the exception: it is due north of the origin and
+    points due south, straight at it.
+
+    Also present and expected to stay out of every result:
+
+    * img_facing_away — 1327 m, *nearer* than img_facing_origin, but pointing
+      due north, away from the origin
+    * img3 (aerial, so its coverage is a polygon) and img_aerial_with_point
+      (aerial, but carrying a legacy point georeference *at* the origin)
+    * img_private and img_duplicate, both ``is_searchable=False`` and both
+      georeferenced within a few metres of the origin
+    * img2's superseded georeference, at the origin itself
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+
+        # A second public source, so the `source` filter has something to cut.
+        cls.source_other = Source.objects.create(
+            name="Community Scrapbook",
+            slug="scrapbook",
+            url="https://example.com/scrapbook",
+            description="Donated photographs.",
+            public=True,
+        )
+        cls.collection_c = Collection.objects.create(
+            source=cls.source_other,
+            name="Collection C",
+            slug="c",
+            url="https://example.com/c",
+            public=True,
+        )
+
+        cls.img_near = cls._make_image(cls.collection, "Corner store 1950", 1950, 1950)
+        cls.img_far_b = cls._make_image(cls.collection_b, "Rooftops 1960", 1960, 1960)
+        cls.img_other_source = cls._make_image(
+            cls.collection_c, "Parade 1970", 1970, 1970
+        )
+
+        # An aerial image that also carries a legacy *point* georeference,
+        # right on top of the origin. Real data has these: an image gets a
+        # point, is later reclassified as aerial, and Image.is_georeferenced
+        # stops counting the point. In-view search must not surface it.
+        cls.img_aerial_with_point = cls._make_image(
+            cls.collection, "Downtown from the air 1955", 1955, 1955
+        )
+        Image.objects.filter(pk=cls.img_aerial_with_point.pk).update(aerial=True)
+        cls.img_aerial_with_point.refresh_from_db()
+        cls._georeference(cls.img_aerial_with_point, ORIGIN_LON, ORIGIN_LAT)
+
+        # A matched pair due north of the origin, so the bearing back to it is
+        # due south (180). One points at the origin, one points away; the one
+        # pointing away is the nearer of the two, so distance alone would rank
+        # it first.
+        cls.img_facing_origin = cls._make_image(
+            cls.collection, "Looking south down the avenue 1935", 1935, 1935
+        )
+        cls.img_facing_away = cls._make_image(
+            cls.collection, "Looking north up the avenue 1935", 1935, 1935
+        )
+        cls._georeference(cls.img_facing_origin, ORIGIN_LON, 37.5420, direction=180)
+        cls._georeference(cls.img_facing_away, ORIGIN_LON, 37.54195, direction=0)
+
+        cls._georeference(cls.img_near, ORIGIN_LON, 37.5310)
+        cls._georeference(cls.img_far_b, ORIGIN_LON, 37.5400)
+        cls._georeference(cls.img_other_source, ORIGIN_LON, 37.5500)
+
+        # Not searchable, but placed nearer than anything else: if either
+        # surfaces, the is_searchable filter is not doing its job.
+        cls._georeference(cls.img_private, ORIGIN_LON, 37.53005)
+        cls._georeference(cls.img_duplicate, ORIGIN_LON, 37.53005)
+
+        # Nearest first.
+        cls.expected_order = [
+            cls.img_near.id,
+            cls.img2.id,
+            cls.img_far_b.id,
+            cls.img_facing_origin.id,
+            cls.img1.id,
+            cls.img_other_source.id,
+        ]
+
+    @classmethod
+    def _make_image(cls, collection, title, start_year, end_year):
+        img = Image.objects.create(
+            collection=collection,
+            title=title,
+            permalink=f"https://img.example.com/{title}.jpg",
+            original_date=str(start_year),
+        )
+        Image.objects.filter(pk=img.pk).update(
+            fuzzy_start_decdate=start_year,
+            fuzzy_end_decdate=end_year,
+        )
+        # Pick up the signal-computed is_searchable flag.
+        img.refresh_from_db()
+        return img
+
+    @classmethod
+    def _georeference(cls, image, longitude, latitude, direction=None):
+        return Georeference.objects.create(
+            image=image,
+            point=Point(longitude, latitude, srid=4326),
+            direction=direction,
+            confidence="medium",
+            georeferenced_by=cls.user_alice,
+        )
+
+    def _search(self, expect=200, **params):
+        query = {"lat": ORIGIN_LAT, "lon": ORIGIN_LON, **params}
+        resp = self.client.get("/api/v2/search/in-view/", query)
+        self.assertEqual(resp.status_code, expect)
+        return resp.json()
+
+    def _ids(self, **params):
+        return [r["id"] for r in self._search(**params)["results"]]
+
+    # -- Coordinate validation --
+
+    def test_missing_lat(self):
+        resp = self.client.get("/api/v2/search/in-view/", {"lon": ORIGIN_LON})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("error", resp.json())
+
+    def test_missing_lon(self):
+        resp = self.client.get("/api/v2/search/in-view/", {"lat": ORIGIN_LAT})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("error", resp.json())
+
+    def test_non_numeric_coordinate(self):
+        data = self._search(expect=400, lat="somewhere")
+        self.assertIn("error", data)
+
+    def test_nan_coordinate_rejected(self):
+        # float("nan") is happy to parse this; PostGIS is not.
+        data = self._search(expect=400, lat="nan")
+        self.assertIn("error", data)
+
+    def test_infinity_coordinate_rejected(self):
+        data = self._search(expect=400, lon="Infinity")
+        self.assertIn("error", data)
+
+    def test_latitude_out_of_range(self):
+        self._search(expect=400, lat=91)
+
+    def test_longitude_out_of_range(self):
+        self._search(expect=400, lon=181)
+
+    def test_radius_must_be_positive(self):
+        self._search(expect=400, radius=0)
+
+    def test_radius_non_numeric(self):
+        self._search(expect=400, radius="near")
+
+    # -- Ordering and deduplication --
+
+    def test_results_ordered_nearest_first(self):
+        self.assertEqual(self._ids(), self.expected_order)
+
+    def test_distances_increase_and_are_in_metres(self):
+        results = self._search()["results"]
+        distances = [r["distance_m"] for r in results]
+        self.assertEqual(distances, sorted(distances))
+        # img_near sits 0.001 degrees of latitude north of the origin.
+        self.assertAlmostEqual(distances[0], 111.0, delta=2.0)
+
+    def test_image_with_two_georeferences_appears_once(self):
+        ids = self._ids()
+        self.assertEqual(ids.count(self.img2.id), 1)
+
+    def test_image_reported_at_its_latest_georeference(self):
+        result = next(r for r in self._search()["results"] if r["id"] == self.img2.id)
+        self.assertAlmostEqual(result["georeference"]["longitude"], -77.45, places=6)
+        self.assertAlmostEqual(result["georeference"]["latitude"], 37.53, places=6)
+        self.assertEqual(result["georeference"]["confidence"], "low")
+        # 0.01 degrees of longitude at this latitude, not the zero metres its
+        # superseded georeference would have reported.
+        self.assertAlmostEqual(result["distance_m"], 884.0, delta=5.0)
+
+    def test_superseded_location_does_not_match(self):
+        # The origin *is* img2's old point. Within 200 m of it there should be
+        # exactly one image — and it is not img2.
+        self.assertEqual(self._ids(radius=200), [self.img_near.id])
+
+    # -- Exclusions --
+
+    def test_aerial_image_excluded(self):
+        # img3's coverage is a polygon, so it has no point georeference.
+        self.assertNotIn(self.img3.id, self._ids())
+
+    def test_aerial_image_with_legacy_point_excluded(self):
+        # Sitting exactly on the origin, so it would lead every result set if
+        # the aerial filter were only implicit in the choice of table.
+        self.assertNotIn(self.img_aerial_with_point.id, self._ids())
+        self.assertEqual(self._ids(radius=50), [])
+
+    def test_non_searchable_images_excluded(self):
+        ids = self._ids()
+        self.assertNotIn(self.img_private.id, ids)
+        self.assertNotIn(self.img_duplicate.id, ids)
+
+    # -- Where the camera was pointing --
+
+    def test_georeference_facing_away_excluded(self):
+        """Being close is not enough: the photograph has to look this way.
+
+        img_facing_away stands 1327 m out and img_facing_origin 1332 m, so on
+        distance alone the one facing away would come first.
+        """
+        ids = self._ids()
+        self.assertNotIn(self.img_facing_away.id, ids)
+        self.assertIn(self.img_facing_origin.id, ids)
+
+    def test_georeference_without_direction_included(self):
+        # Most of the collection has no recorded direction; dropping those
+        # rows would empty the results.
+        self.assertIsNone(self.img_near.georeferences.get().direction)
+        self.assertIn(self.img_near.id, self._ids())
+
+    def test_sweep_width(self):
+        """The cone is IN_VIEW_SEARCH_DIRECTION_SWEEP_DEGREES wide, half each side."""
+        # Due north of the origin, so the bearing back to it is 180. The 20
+        # degree boundary itself is inclusive but deliberately not asserted on:
+        # it is a knife edge in floating point, not a behaviour worth pinning.
+        matched = []
+        for offset in (0, 19, 21, 90, 180):
+            img = self._make_image(self.collection, f"Sweep {offset}", 1935, 1935)
+            self._georeference(img, ORIGIN_LON, 37.5450, direction=(180 + offset) % 360)
+            if img.id in self._ids(page_size=100):
+                matched.append(offset)
+        self.assertEqual(matched, [0, 19])
+
+    def test_wide_sweep_admits_every_direction(self):
+        with override_settings(IN_VIEW_SEARCH_DIRECTION_SWEEP_DEGREES=360):
+            self.assertIn(self.img_facing_away.id, self._ids())
+
+    def test_direction_filter_applies_to_count(self):
+        # The total has to agree with the rows: 1400 m takes in the whole
+        # facing pair, but only the one looking this way is a result.
+        data = self._search(radius=1400)
+        self.assertEqual(data["count"], 4)
+        self.assertEqual(
+            [r["id"] for r in data["results"]],
+            [
+                self.img_near.id,
+                self.img2.id,
+                self.img_far_b.id,
+                self.img_facing_origin.id,
+            ],
+        )
+
+    # -- Radius, count, and paging --
+
+    def test_radius_bounds_results(self):
+        self.assertEqual(self._ids(radius=1000), [self.img_near.id, self.img2.id])
+
+    def test_radius_populates_count(self):
+        data = self._search(radius=1000)
+        self.assertEqual(data["count"], 2)
+        self.assertEqual(data["radius"], 1000.0)
+
+    def test_count_is_null_without_radius(self):
+        # Without a bound every georeferenced image is a result, so a total
+        # would be a misleading way of saying "all of them".
+        data = self._search()
+        self.assertIsNone(data["count"])
+        self.assertIsNone(data["radius"])
+
+    def test_radius_clamped_to_maximum(self):
+        with override_settings(IN_VIEW_SEARCH_MAX_RADIUS_M=500.0):
+            data = self._search(radius=999999)
+        self.assertEqual(data["radius"], 500.0)
+
+    def test_has_more_and_paging(self):
+        first = self._search(page_size=2)
+        self.assertTrue(first["has_more"])
+        self.assertEqual([r["id"] for r in first["results"]], self.expected_order[:2])
+
+        second = self._search(page=2, page_size=2)
+        self.assertTrue(second["has_more"])
+        self.assertEqual([r["id"] for r in second["results"]], self.expected_order[2:4])
+
+        third = self._search(page=3, page_size=2)
+        self.assertFalse(third["has_more"])
+        self.assertEqual([r["id"] for r in third["results"]], self.expected_order[4:])
+
+    def test_page_size_capped_at_100(self):
+        self.assertEqual(self._search(page_size=500)["page_size"], 100)
+
+    def test_page_beyond_max_results_rejected(self):
+        with override_settings(IN_VIEW_SEARCH_MAX_RESULTS=50):
+            self._search(expect=200, page=2, page_size=20)
+            self._search(expect=400, page=3, page_size=20)
+
+    # -- Filters compose with the distance ordering --
+
+    def test_year_min_filter(self):
+        ids = self._ids(year_min=1915)
+        self.assertNotIn(self.img1.id, ids)
+        self.assertEqual(
+            ids,
+            [
+                self.img_near.id,
+                self.img2.id,
+                self.img_far_b.id,
+                self.img_facing_origin.id,
+                self.img_other_source.id,
+            ],
+        )
+
+    def test_year_max_filter(self):
+        self.assertEqual(self._ids(year_max=1915), [self.img1.id])
+
+    def test_source_filter(self):
+        self.assertEqual(
+            self._ids(source=self.source_other.id), [self.img_other_source.id]
+        )
+
+    def test_collection_filter(self):
+        self.assertEqual(
+            self._ids(collection=self.collection_b.id), [self.img_far_b.id]
+        )
+
+    def test_subject_filter(self):
+        # Only img1 carries the Main Street subject mapping.
+        self.assertEqual(self._ids(subject=self.subject.id), [self.img1.id])
+
+    def test_invalid_filter_value(self):
+        self._search(expect=400, source="lva")

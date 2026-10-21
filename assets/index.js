@@ -12,6 +12,7 @@ import "./styles/components/image-cards.css";
 
 // Import global utilities
 import "./js/components/notifications.js";
+import { initRegionSelector } from "./js/components/region_selector";
 
 // Import Font Awesome core
 import { library, dom } from "@fortawesome/fontawesome-svg-core";
@@ -45,6 +46,8 @@ import {
   faCircleXmark,
   faClock,
   faCloudUploadAlt,
+  faClone,
+  faCode,
   faCog,
   faComment,
   faCompass,
@@ -69,6 +72,7 @@ import {
   faGlobe,
   faGripVertical,
   faHeading,
+  faHeart,
   faHistory,
   faHome,
   faHourglass,
@@ -152,6 +156,8 @@ library.add(
   faCircleXmark,
   faClock,
   faCloudUploadAlt,
+  faClone,
+  faCode,
   faCog,
   faComment,
   faCompass,
@@ -176,6 +182,7 @@ library.add(
   faGlobe,
   faGripVertical,
   faHeading,
+  faHeart,
   faHistory,
   faHome,
   faHourglass,
@@ -239,6 +246,10 @@ window.bootstrap = bootstrap;
 
 // Make Alpine globally available for page scripts to register components
 window.Alpine = Alpine;
+
+// Register the navbar region selector — must run after the window.Alpine
+// assignment above and before Alpine.start() below.
+initRegionSelector();
 
 /**
  * Global CSRF token utility - available throughout the app

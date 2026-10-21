@@ -1,14 +1,15 @@
-import base64
 import logging
-import threading
+import time
+import uuid
+from datetime import timedelta
 from io import BytesIO
-from pathlib import Path
 
 import requests
 from celery import shared_task
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import F
+from django.utils import timezone
 from iiif_prezi3 import (
     Annotation,
     AnnotationBody,
@@ -21,97 +22,38 @@ from PIL import Image as PILImage
 
 from yesterdays.iiif import generate_and_upload_iiif_tiles
 
-from .models import CollectionStats, Image, ImportSlot
+from . import clip_client
+from .embeddings import QUERY_VECTOR_SQL, VECTOR_SQL
+from .models import (
+    CollectionEmbeddingStats,
+    CollectionRegionStats,
+    CollectionStats,
+    DuplicateImagePair,
+    Image,
+    ImportSlot,
+)
 from .utils import R2Uploader, R2UploaderError, to_rgb
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# CLIP model management (loaded once per worker process)
-# ---------------------------------------------------------------------------
-_clip_model = None
-_clip_preprocess = None
-_clip_device = None
-_clip_model_lock = threading.Lock()
+# How long a zeroed CollectionRegionStats row must sit untouched before the
+# reconcile below drops it. An internal safety margin against deleting a row a
+# concurrent refresh is about to rewrite, not a tunable.
+EMPTY_REGION_STATS_TTL = timedelta(days=1)
 
+# Maximum side of the image sent to the embedding service. The service squashes
+# the whole frame to its square input (336px), so this only bounds upload size.
+EMBEDDING_MAX_DIMENSION = 1024
 
-def _load_clip_model():
-    """Load CLIP model on first use (cached per-worker, thread-safe)."""
-    global _clip_model, _clip_preprocess, _clip_device
-
-    if _clip_model is not None:
-        return _clip_model, _clip_preprocess, _clip_device
-
-    with _clip_model_lock:
-        if _clip_model is not None:
-            return _clip_model, _clip_preprocess, _clip_device
-
-        import clip
-        import torch
-
-        _clip_device = "cuda" if torch.cuda.is_available() else "cpu"
-        model_name = "ViT-L/14@336px"
-        local_model_dir = Path("./models").absolute()
-        _clip_model, _clip_preprocess = clip.load(
-            model_name, device=_clip_device, download_root=local_model_dir
-        )
-        logger.info("CLIP model loaded on worker (device: %s)", _clip_device)
-        return _clip_model, _clip_preprocess, _clip_device
-
-
-def warmup_clip_model():
-    """Pre-load the CLIP model into memory. Returns True if successful."""
-    try:
-        logger.info("Warming up CLIP model...")
-        _load_clip_model()
-        logger.info("CLIP model loaded successfully (device: %s)", _clip_device)
-        return True
-    except Exception as e:
-        logger.error("Failed to load CLIP model: %s", e)
-        return False
-
-
-# ---------------------------------------------------------------------------
-# CLIP encoding tasks (routed to the urgent queue)
-# ---------------------------------------------------------------------------
-@shared_task(ignore_result=False, time_limit=60, soft_time_limit=45)
-def encode_text(text):
-    """Encode a text query into a CLIP embedding vector.
-
-    Returns the embedding as a list of floats.
-    """
-    import clip
-    import torch
-
-    model, _preprocess, device = _load_clip_model()
-    with torch.no_grad():
-        text_input = clip.tokenize([text]).to(device)
-        text_features = model.encode_text(text_input)
-        text_features /= text_features.norm(dim=-1, keepdim=True)
-    return text_features.cpu().numpy()[0].tolist()
-
-
-@shared_task(ignore_result=False, time_limit=60, soft_time_limit=45)
-def encode_image(image_b64):
-    """Encode a base64-encoded image into a CLIP embedding vector.
-
-    Accepts the image as a base64-encoded string (already sanitised by the
-    calling view). Returns the embedding as a list of floats.
-    """
-    import torch
-
-    model, preprocess, device = _load_clip_model()
-    image_bytes = base64.b64decode(image_b64)
-    pil_image = PILImage.open(BytesIO(image_bytes)).convert("RGB")
-    with torch.no_grad():
-        image_input = preprocess(pil_image).unsqueeze(0).to(device)
-        image_features = model.encode_image(image_input)
-        image_features /= image_features.norm(dim=-1, keepdim=True)
-    return image_features.cpu().numpy()[0].tolist()
+# Images per generate_embeddings_batch run, and how long one run may spend
+# encoding before handing the rest to its successor. The budget leaves room for
+# one more slow image (download + service timeouts) under CELERY_TASK_SOFT_TIME_LIMIT.
+EMBEDDING_TASK_BATCH_SIZE = 50
+EMBEDDING_TASK_TIME_BUDGET = 120
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60, ignore_result=True)
-def process_image(self, image_id: int, quality: int = 85):
+def process_image(self, image_id: int, quality: int = 85, force: bool = False):
     """
     Ensure an image has the correct transformed/plain assets on R2.
 
@@ -120,6 +62,7 @@ def process_image(self, image_id: int, quality: int = 85):
     - If the image has a transform: apply it, upload full-size + thumbnail
     - If no transform but no thumbnail: generate a plain thumbnail
     - If everything is already correct: do nothing
+    - If forced: regenerate all derived assets in a new generation
 
     A stale-write guard re-checks the DB before writing, so concurrent tasks
     from rapid saves won't clobber each other.
@@ -137,12 +80,20 @@ def process_image(self, image_id: int, quality: int = 85):
     needs_transform = image.has_transform and not image.transformed_permalink
     needs_thumbnail = not image.thumbnail
     needs_transform_cleanup = not image.has_transform and image.transformed_permalink
+    # The embedding is of the displayed image, so it goes stale whenever the
+    # transformed copy appears, changes or goes away. A changed transform
+    # clears transformed_permalink and thumbnail in Image.save, which lands in
+    # one of these. Images never embedded are left for generate_embeddings.
+    needs_reembed = image.embedding is not None and (
+        needs_transform or needs_transform_cleanup or needs_thumbnail
+    )
     # Legacy images predate versioned assets — their thumbnail/permalink point
     # at unversioned URLs, so re-emit them into a claimed generation directory.
     needs_migration = image.asset_generation == 0
 
     if (
-        not needs_transform
+        not force
+        and not needs_transform
         and not needs_thumbnail
         and not needs_transform_cleanup
         and not needs_migration
@@ -214,14 +165,17 @@ def process_image(self, image_id: int, quality: int = 85):
         # current generation's R2 directory, so persisting a superseded
         # generation's URLs would leave the DB pointing at objects that are
         # about to be deleted.
-        updated = Image.objects.filter(
-            pk=image_id, asset_generation=generation
-        ).update(
+        # iiif_url is left alone: generate_iiif_tiles overwrites it in the same
+        # statement that marks tiles complete, so the viewer switches the
+        # moment the new tiles are on R2. Nulling it here would instead blank
+        # the deep-zoom viewer for the whole tiling run — minutes, on a large
+        # scan — while the previous generation's tiles sit there perfectly
+        # serviceable. Clearing tile_status is what marks tiles as stale.
+        updated = Image.objects.filter(pk=image_id, asset_generation=generation).update(
             transformed_permalink=transformed_url,
             thumbnail=thumb_url,
             tile_status="",
             tile_error="",
-            iiif_url=None,
         )
         if not updated:
             logger.info(
@@ -238,6 +192,8 @@ def process_image(self, image_id: int, quality: int = 85):
         logger.exception("Failed to process image %d", image_id)
         return
 
+    if needs_reembed and clip_client.is_configured():
+        generate_embeddings_batch.delay(force=True, image_ids=[image_id])
     generate_iiif_tiles.delay(image_id)
 
 
@@ -316,6 +272,33 @@ def download_image(url: str, timeout: int = 30) -> PILImage.Image | None:
         return to_rgb(PILImage.open(image_data))
     except Exception:
         return None
+
+
+def embed_image_url(url: str, timeout: int = 30) -> list[float]:
+    """Download an image, shrink it, and return its embedding.
+
+    The whole frame is sent: the service squashes it to the model's square
+    input, as the model was evaluated. Raises on any failure (download,
+    non-image response, decode, or the embedding service itself, including a
+    model mismatch); callers decide how to report it.
+    """
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+
+    content_type = response.headers.get("content-type", "").lower()
+    if not content_type.startswith("image/"):
+        raise ValueError(f"URL does not return an image: {url}")
+
+    with PILImage.open(BytesIO(response.content)) as img:
+        img = to_rgb(img)
+    img.thumbnail(
+        (EMBEDDING_MAX_DIMENSION, EMBEDDING_MAX_DIMENSION),
+        PILImage.Resampling.LANCZOS,
+    )
+
+    output = BytesIO()
+    img.save(output, format="PNG")
+    return clip_client.get_image_embedding(output.getvalue())
 
 
 def create_thumbnail(img: PILImage.Image, max_dimension: int = 500) -> PILImage.Image:
@@ -455,9 +438,7 @@ def generate_iiif_tiles(self, image_id):
         # claimed while we were tiling, our tiles live in a directory that
         # cleanup_old_image_assets will delete — don't point the DB at them.
         # The newer run re-queues tiling for its own generation.
-        updated = Image.objects.filter(
-            pk=image_id, asset_generation=generation
-        ).update(
+        updated = Image.objects.filter(pk=image_id, asset_generation=generation).update(
             tile_status="complete",
             tile_error="",
             iiif_url=iiif_base,
@@ -573,3 +554,207 @@ def reconcile_collection_stats():
     (bulk updates, raw SQL).
     """
     CollectionStats.refresh_for()
+
+
+@shared_task(ignore_result=True)
+def reconcile_collection_region_stats():
+    """Recompute every CollectionRegionStats row from scratch.
+
+    Same role as reconcile_collection_stats for the per-region table, plus the
+    garbage collection of rows for pairs that no longer have any images: the
+    refresh zeroes those rather than deleting them, so that every write goes
+    through the freshness guard.
+    """
+    CollectionRegionStats.refresh_for()
+    # The refresh above re-stamped every pair that still has images, so a row
+    # left at zero this long is definitively dead — no in-flight refresh can
+    # still be about to write it.
+    CollectionRegionStats.objects.filter(
+        total_images=0, updated_at__lt=timezone.now() - EMPTY_REGION_STATS_TTL
+    ).delete()
+
+
+@shared_task(ignore_result=True)
+def refresh_collection_embedding_stats():
+    """Recompute every collection's mean image embedding.
+
+    These means power the style-neutral subject similarity query
+    (subjects/similarity.py). The frequent refresh_next task below keeps them
+    current between runs; this daily full refresh is the reconcile backstop
+    for changes the count-mismatch check can't see (e.g. embeddings
+    regenerated in place), and does the initial seeding after deploy.
+    """
+    CollectionEmbeddingStats.refresh_for()
+
+
+@shared_task(ignore_result=True)
+def refresh_next_collection_embedding_stats():
+    """Refresh the most stale collection's mean embedding, if any.
+
+    A collection is stale when its stored embedding_count differs from its
+    current number of eligible images (including collections with no stats
+    row yet). At most one collection is recomputed per run, so a bulk import
+    costs one cheap counting scan per interval — never a recompute per image —
+    and the most-drifted collection is fixed first.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT c.id
+            FROM images_collection c
+            LEFT JOIN images_collectionembeddingstats s ON s.collection_id = c.id
+            LEFT JOIN images_image img ON img.collection_id = c.id
+                AND {CollectionEmbeddingStats.ELIGIBLE_SQL.format(alias="img.")}
+            GROUP BY c.id, s.embedding_count
+            HAVING COUNT(img.id) IS DISTINCT FROM COALESCE(s.embedding_count, 0)
+            ORDER BY ABS(COUNT(img.id) - COALESCE(s.embedding_count, 0)) DESC, c.id
+            LIMIT 1
+            """
+        )
+        row = cursor.fetchone()
+    if row:
+        CollectionEmbeddingStats.refresh_for([row[0]])
+
+
+@shared_task(ignore_result=True)
+def generate_embeddings_batch(
+    after_id: int = 0,
+    force: bool = False,
+    image_ids: list[int] | None = None,
+):
+    """Generate embeddings for images lacking one, then queue the rest.
+
+    Works through up to EMBEDDING_TASK_BATCH_SIZE images in id order, stopping
+    early once EMBEDDING_TASK_TIME_BUDGET is spent, and re-queues itself to
+    continue after the last image it reached. As a single self-requeuing chain
+    it keeps one request in flight against the embedding service (which encodes
+    serially per replica) however many worker processes are idle. Failures are
+    logged and skipped, so they stay embedding-less for a later run to retry.
+
+    Args:
+        after_id: Resume after this image id
+        force: Also regenerate images that already have an embedding
+        image_ids: Optional specific image IDs to process
+    """
+    if not clip_client.is_configured():
+        logger.warning("CLIP_SERVICE_URL is not set; skipping embedding generation")
+        return
+
+    queryset = Image.objects.filter(id__gt=after_id).only(
+        "id", "permalink", "transformed_permalink"
+    )
+    if not force:
+        queryset = queryset.filter(embedding__isnull=True)
+    if image_ids:
+        queryset = queryset.filter(id__in=image_ids)
+    batch = list(queryset.order_by("id")[:EMBEDDING_TASK_BATCH_SIZE])
+    if not batch:
+        return
+
+    deadline = time.monotonic() + EMBEDDING_TASK_TIME_BUDGET
+    last_id = after_id
+    for image in batch:
+        if time.monotonic() > deadline:
+            break
+        last_id = image.id
+        try:
+            embedding = embed_image_url(image.display_permalink)
+        except clip_client.ClipServiceMismatch:
+            # The service runs a different model than settings expect (e.g.
+            # mid-rollout); every image would fail alike, so end the chain.
+            logger.exception("Stopping embedding generation at image %s", image.id)
+            return
+        except Exception as e:
+            logger.warning("Failed to embed image %s: %s", image.id, e)
+            continue
+        Image.objects.filter(pk=image.id).update(embedding=embedding)
+
+    generate_embeddings_batch.delay(after_id=last_id, force=force, image_ids=image_ids)
+
+
+@shared_task(ignore_result=True)
+def refresh_duplicate_image_pairs():
+    """
+    Rebuild the candidate visual-duplicate pair table (nightly).
+
+    For every searchable, non-duplicate image, find its nearest neighbors by
+    embedding cosine distance via the partial HNSW index, then keep the
+    globally closest settings.DUPLICATE_PAIRS_COUNT pairs. Binding each image's
+    own embedding back as a QUERY_VECTOR_SQL parameter guarantees the index is
+    used, exactly as semantic search does. The whole table is then replaced
+    atomically.
+    """
+    neighbor_sql = f"""
+        SELECT id, ({VECTOR_SQL} <=> {QUERY_VECTOR_SQL}) AS distance
+        FROM images_image
+        WHERE is_searchable = true
+          AND embedding IS NOT NULL
+          AND duplicate_of_id IS NULL
+          AND id <> %s
+        ORDER BY {VECTOR_SQL} <=> {QUERY_VECTOR_SQL}
+        LIMIT %s
+    """
+    k = settings.DUPLICATE_PAIRS_NEIGHBORS
+    batch_size = settings.DUPLICATE_PAIRS_BATCH_SIZE
+    pairs = {}
+    with connection.cursor() as cursor:
+        cursor.execute("SET hnsw.ef_search = %s", [settings.DUPLICATE_PAIRS_EF_SEARCH])
+        try:
+            cursor.execute(
+                "SELECT id FROM images_image "
+                "WHERE is_searchable = true AND embedding IS NOT NULL "
+                "AND duplicate_of_id IS NULL"
+            )
+            image_ids = [row[0] for row in cursor.fetchall()]
+            for start in range(0, len(image_ids), batch_size):
+                chunk = image_ids[start : start + batch_size]
+                cursor.execute(
+                    "SELECT id, embedding FROM images_image WHERE id = ANY(%s)",
+                    [chunk],
+                )
+                # fetchall() materializes the chunk, freeing the cursor for the
+                # per-image neighbor queries issued inside the loop.
+                for image_id, embedding in cursor.fetchall():
+                    cursor.execute(neighbor_sql, [embedding, image_id, embedding, k])
+                    for neighbor_id, distance in cursor.fetchall():
+                        key = (
+                            (image_id, neighbor_id)
+                            if image_id < neighbor_id
+                            else (neighbor_id, image_id)
+                        )
+                        if key not in pairs or distance < pairs[key]:
+                            pairs[key] = distance
+        finally:
+            cursor.execute("RESET hnsw.ef_search")
+
+    closest = sorted(pairs.items(), key=lambda item: item[1])[
+        : settings.DUPLICATE_PAIRS_COUNT
+    ]
+    # Preserve the uuid of any pair that persists across the rebuild so its
+    # review url stays stable; new pairs fall back to a fresh uuid.
+    existing_uuids = {
+        (a_id, b_id): pair_uuid
+        for a_id, b_id, pair_uuid in DuplicateImagePair.objects.values_list(
+            "image_a_id", "image_b_id", "uuid"
+        )
+    }
+    computed_at = timezone.now()
+    with transaction.atomic():
+        DuplicateImagePair.objects.all().delete()
+        DuplicateImagePair.objects.bulk_create(
+            [
+                DuplicateImagePair(
+                    uuid=existing_uuids.get((a_id, b_id)) or uuid.uuid4(),
+                    image_a_id=a_id,
+                    image_b_id=b_id,
+                    distance=distance,
+                    computed_at=computed_at,
+                )
+                for (a_id, b_id), distance in closest
+            ]
+        )
+    logger.info(
+        "refresh_duplicate_image_pairs: scanned %d images, stored %d pairs",
+        len(image_ids),
+        len(closest),
+    )
